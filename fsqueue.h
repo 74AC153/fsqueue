@@ -2,6 +2,8 @@
 #define FSQUEUE_H_INCLUDED
 
 struct fsq {
+	int dirfd;
+
 	int rd_idx_fd;
 	void *rd_idx_base;
 
@@ -11,7 +13,7 @@ struct fsq {
 	int data_dirfd;
 };
 
-int fsq_open(int dirfd, struct fsq *q);
+int fsq_openat(int dirfd, const char *path, struct fsq *q);
 int fsq_init(struct fsq *q);
 void fsq_close(struct fsq *q);
 

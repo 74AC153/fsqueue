@@ -29,7 +29,6 @@ int main(int argc, char *argv[])
 	char *infile = NULL;
 	char *outfile = NULL;
 
-	int dirfd = -1;
 	struct fsq q;
 	int rc;
 	char *buf = NULL;
@@ -68,19 +67,11 @@ usage:
 		goto usage;
 	}
 
-	dirfd = open(qname, O_RDONLY | O_DIRECTORY);
-	if(dirfd < 0) {
-		perror("error: open(<queue>)");
-		return 1;
-	}
-
-	if((rc = fsq_open(dirfd, &q))) {
-		fprintf(stderr, "error: fsq_open() returned %d (errno=%d, %s)\n",
+	if((rc = fsq_openat(AT_FDCWD, qname, &q))) {
+		fprintf(stderr, "error: fsq_openat() returned %d (errno=%d, %s)\n",
 		        rc, errno, strerror(errno));
 		return 1;
 	}
-
-	close(dirfd);
 
 	if(infile) {
 		FILE *instream = NULL;

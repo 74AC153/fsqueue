@@ -15,6 +15,7 @@
 
 static void fsq_struct_init(struct fsq *q)
 {
+	q->dirfd = -1;
 	q->rd_idx_fd = -1;
 	q->rd_idx_base = MAP_FAILED;
 	q->wr_idx_fd = -1;
@@ -22,42 +23,48 @@ static void fsq_struct_init(struct fsq *q)
 	q->data_dirfd = -1;
 }
 
-int fsq_open(int dirfd, struct fsq *q)
+int fsq_openat(int dirfd, const char *path, struct fsq *q)
 {
 	int status = 0;
 
 	fsq_struct_init(q);
 
-	q->rd_idx_fd = openat(dirfd, "rd_idx", O_CREAT | O_RDWR, 0644);
-	if(q->rd_idx_fd < 0) {
+	q->dirfd = openat(dirfd, path, O_RDONLY | O_DIRECTORY);
+	if(q->dirfd < 0) {
 		status = -1;
 		goto error;
 	}
-	if(ftruncate(q->rd_idx_fd, sizeof(uint64_t))) {
+
+	q->rd_idx_fd = openat(q->dirfd, "rd_idx", O_CREAT | O_RDWR, 0644);
+	if(q->rd_idx_fd < 0) {
 		status = -2;
 		goto error;
 	}
-
-	q->wr_idx_fd = openat(dirfd, "wr_idx", O_CREAT | O_RDWR, 0644);
-	if(q->wr_idx_fd < 0) {
+	if(ftruncate(q->rd_idx_fd, sizeof(uint64_t))) {
 		status = -3;
 		goto error;
 	}
-	if(ftruncate(q->wr_idx_fd, sizeof(uint64_t))) {
+
+	q->wr_idx_fd = openat(q->dirfd, "wr_idx", O_CREAT | O_RDWR, 0644);
+	if(q->wr_idx_fd < 0) {
 		status = -4;
 		goto error;
 	}
+	if(ftruncate(q->wr_idx_fd, sizeof(uint64_t))) {
+		status = -5;
+		goto error;
+	}
 
-	if(mkdirat(dirfd, "data", 0755)) {
+	if(mkdirat(q->dirfd, "data", 0755)) {
 		if(errno != EEXIST) {
-			status = -5;
+			status = -6;
 			goto error;
 		}
 	}
 
-	q->data_dirfd = openat(dirfd, "data", O_RDONLY | O_DIRECTORY);
+	q->data_dirfd = openat(q->dirfd, "data", O_RDONLY | O_DIRECTORY);
 	if(q->data_dirfd < 0) {
-		status = -6;
+		status = -7;
 		goto error;
 	}
 
@@ -66,7 +73,7 @@ int fsq_open(int dirfd, struct fsq *q)
 		     PROT_READ | PROT_WRITE, MAP_SHARED,
 		     q->rd_idx_fd, 0);
 	if(q->rd_idx_base == MAP_FAILED) {
-		status = -7;
+		status = -8;
 		goto error;
 	}
 
@@ -75,7 +82,7 @@ int fsq_open(int dirfd, struct fsq *q)
 		     PROT_READ | PROT_WRITE, MAP_SHARED,
 		     q->wr_idx_fd, 0);
 	if(q->wr_idx_base == MAP_FAILED) {
-		status = -8;
+		status = -9;
 		goto error;
 	}
 
@@ -113,6 +120,9 @@ error:
 
 void fsq_close(struct fsq *q)
 {
+	if(q->dirfd >= 0)
+		close(q->dirfd);
+
 	if(q->rd_idx_base != MAP_FAILED)
 		munmap(q->rd_idx_base, sizeof(uint64_t));
 
