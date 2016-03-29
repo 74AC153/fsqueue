@@ -9,6 +9,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <stdio.h>
+#include <time.h>
 
 #include "fsqueue.h"
 
@@ -137,6 +138,98 @@ void fsq_close(struct fsq *q)
 
 	if(q->data_dirfd >= 0)
 		close(q->data_dirfd);
+}
+
+static struct timespec timespec_add(struct timespec x, struct timespec y)
+{
+	struct timespec ret = {0, 0};
+
+	ret.tv_nsec = x.tv_nsec + y.tv_nsec;
+	if(ret.tv_nsec > 1000000000) {
+		ret.tv_sec++;
+		ret.tv_nsec -= 1000000000;
+	}
+	ret.tv_sec += x.tv_sec + y.tv_sec;
+
+	return ret;
+}
+
+// return lhs >= rhs
+static _Bool timespec_geq(struct timespec lhs, struct timespec rhs)
+{
+	if(lhs.tv_sec > rhs.tv_sec)
+		return 1;
+
+	if(lhs.tv_sec == rhs.tv_sec)
+		return lhs.tv_nsec > rhs.tv_nsec;
+
+	return 0;
+}
+
+#define POLL_INTERVAL_US 100000
+int fsq_lock(struct fsq *q, unsigned timeout_ms)
+{
+	int status = 0;
+
+	struct timespec ts, timeout;
+	if(clock_gettime(CLOCK_REALTIME, &ts))
+		return -2;
+
+	timeout = timespec_add(
+		ts,
+		(struct timespec){
+			.tv_sec = timeout_ms / 1000, 
+			.tv_nsec = (timeout_ms % 1000) * 1000000
+		});
+
+again:
+	while(1) {
+		struct stat sb;
+		if(fstatat(q->dirfd, ".lock", &sb, 0)) {
+			if(errno == ENOENT)
+				break;
+			status = -3;
+			goto error;
+		}
+		usleep(POLL_INTERVAL_US);
+
+		if(timeout_ms != -1U) {
+			if(clock_gettime(CLOCK_REALTIME, &ts))
+				return -4;
+	
+			if(timespec_geq(ts, timeout))
+				return -1;
+		}
+	}
+
+	int fd = openat(q->dirfd, ".lock", O_RDWR | O_CREAT | O_EXCL, 0644);
+	if(fd < 0) {
+		if(errno == EEXIST)
+			goto again;
+
+		status = -5;
+		goto error;
+	}
+
+done:
+	if(fd >= 0)
+		close(fd);
+	return status;
+
+error:
+	goto done;
+}
+
+int fsq_unlock(struct fsq *q)
+{
+	int status = 0;
+
+	if(unlinkat(q->dirfd, ".lock", 0)) {
+		if(errno != ENOENT)
+			status = -1;
+	}
+
+	return status;
 }
 
 int fsq_enq(struct fsq *q, const char *buf, size_t buflen)
