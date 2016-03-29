@@ -166,8 +166,25 @@ static _Bool timespec_geq(struct timespec lhs, struct timespec rhs)
 	return 0;
 }
 
+#if 0
+static int fsq_is_locked(struct fsq *q, _Bool *locked)
+{
+	struct stat sb;
+	*locked = 1;
+	if(fstatat(q->dirfd, ".lock", &sb, 0)) {
+		if(errno == ENOENT) {
+			*locked = 0;
+			return 0;
+		}
+		return -1;
+	}
+	return 0;
+}
+#endif
+
+// timeout_ms can me -1U, in which case wait is forever
 #define POLL_INTERVAL_US 100000
-int fsq_lock(struct fsq *q, unsigned timeout_ms)
+static int fsq_lock(struct fsq *q, unsigned timeout_ms)
 {
 	int status = 0;
 
@@ -220,7 +237,7 @@ error:
 	goto done;
 }
 
-int fsq_unlock(struct fsq *q)
+static int fsq_unlock(struct fsq *q)
 {
 	int status = 0;
 
@@ -238,6 +255,8 @@ int fsq_enq(struct fsq *q, const char *buf, size_t buflen)
 	char name[32];
 	uint64_t idx;
 	int fd = -1;
+
+	fsq_lock(q, -1U);
 
 	idx = be64toh(*(uint64_t *)q->wr_idx_base);
 
@@ -269,6 +288,8 @@ int fsq_enq(struct fsq *q, const char *buf, size_t buflen)
 	}
 
 done:
+	fsq_unlock(q);
+
 	if(fd >= 0)
 		close(fd);
 	return status;
@@ -288,8 +309,12 @@ int fsq_deq(struct fsq *q, char **buf, size_t *buflen)
 	*buf = NULL;
 	*buflen = 0;
 
-	if(*(uint64_t*)q->wr_idx_base <= *(uint64_t*)q->rd_idx_base)
+	fsq_lock(q, -1U);
+
+	if(*(uint64_t*)q->wr_idx_base <= *(uint64_t*)q->rd_idx_base) {
+		fsq_unlock(q);
 		return -1;
+	}
 
 	idx = be64toh(*(uint64_t *)q->rd_idx_base);
 
@@ -323,6 +348,7 @@ int fsq_deq(struct fsq *q, char **buf, size_t *buflen)
 	*(uint64_t *)q->rd_idx_base = htobe64(idx+1);
 	
 done:
+	fsq_unlock(q);
 	close(fd);
 	return status;
 
@@ -333,4 +359,13 @@ error:
 		*buflen = 0;
 	}
 	goto done;
+}
+
+int fsq_deq_wait(struct fsq *q, char **buf, size_t *buflen)
+{
+	int rc;
+	while((rc = fsq_deq(q, buf, buflen)) == -1) {
+		usleep(POLL_INTERVAL_US);
+	}
+	return rc;
 }

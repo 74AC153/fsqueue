@@ -28,7 +28,6 @@ int main(int argc, char *argv[])
 	char *qname = NULL;
 	char *infile = NULL;
 	char *outfile = NULL;
-	_Bool lock = 0;
 
 	struct fsq q;
 	int rc;
@@ -37,12 +36,12 @@ int main(int argc, char *argv[])
 	FILE *bufstream = NULL;
 
 	int opt;
-	while((opt = getopt(argc, argv, "q:le:d:h")) != -1) {
+	while((opt = getopt(argc, argv, "q:e:d:h")) != -1) {
 		switch(opt) {
 			default:
 			case 'h':
 usage:
-				printf("usage: %s -q <queue> [-l] [-e <infile> | -d <outfile>]\n", argv[0]);
+				printf("usage: %s -q <queue> [-e <infile> | -d <outfile>]\n", argv[0]);
 				printf("omit -e and -d to create queue\n");
 				printf("if <infile> or <outfile> are \"--\", use stdin/stdout\n");
 				return opt != 'h';
@@ -55,9 +54,6 @@ usage:
 			case 'd':
 				outfile = optarg;
 				break;	
-			case 'l':
-				lock = 1;
-				break;		
 		}
 	}
 
@@ -75,15 +71,6 @@ usage:
 		fprintf(stderr, "error: fsq_openat() returned %d (errno=%d, %s)\n",
 		        rc, errno, strerror(errno));
 		return 1;
-	}
-
-	if(lock) {
-		while((rc = fsq_lock(&q, 250)) == -1);
-		if(rc) {
-			fprintf(stderr, "error: fsq_lock() returned %d (errno=%d, %s)\n",
-			        rc, errno, strerror(errno));
-			return 1;
-		}
 	}
 
 	if(infile) {
@@ -126,7 +113,7 @@ usage:
 			return 1;
 		}
 
-		if((rc = fsq_deq(&q, &buf, &buflen))) {
+		if((rc = fsq_deq_wait(&q, &buf, &buflen))) {
 			if(rc != -1)
 				fprintf(stderr, "error: fsq_deq() returned %d (errno=%d, %s)\n",
 				        rc, errno, strerror(errno));
@@ -144,14 +131,6 @@ usage:
 	} else {
 		if((rc = fsq_init(&q))) {
 			fprintf(stderr, "error: fsq_init() returned %d (errno=%d, %s)\n",
-			        rc, errno, strerror(errno));
-			return 1;
-		}
-	}
-
-	if(lock) {
-		if((rc = fsq_unlock(&q))) {
-			fprintf(stderr, "error: fsq_unlock() returned %d (errno=%d, %s)\n",
 			        rc, errno, strerror(errno));
 			return 1;
 		}
