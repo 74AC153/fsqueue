@@ -28,22 +28,25 @@ int main(int argc, char *argv[])
 	char *qname = NULL;
 	char *infile = NULL;
 	char *outfile = NULL;
+	char *wait_ms_str = NULL;
 
 	struct fsq q;
 	int rc;
 	char *buf = NULL;
 	size_t buflen = 0;
 	FILE *bufstream = NULL;
+	unsigned long wait_ms = -1UL;
 
 	int opt;
-	while((opt = getopt(argc, argv, "q:e:d:h")) != -1) {
+	while((opt = getopt(argc, argv, "q:w:e:d:h")) != -1) {
 		switch(opt) {
 			default:
 			case 'h':
 usage:
-				printf("usage: %s -q <queue> [-e <infile> | -d <outfile>]\n", argv[0]);
-				printf("omit -e and -d to create queue\n");
-				printf("if <infile> or <outfile> are \"--\", use stdin/stdout\n");
+				printf("usage: %s -q <queue> [-w <wait-ms>] [-e <infile> | -d <outfile>]\n", argv[0]);
+				printf("omit -e and -d to create queue only.\n");
+				printf("if <infile> or <outfile> are \"--\", use stdin/stdout.\n");
+				printf("if -w <wait-ms> is omitted, wait forever.\n");
 				return opt != 'h';
 			case 'q':
 				qname = optarg;
@@ -54,12 +57,28 @@ usage:
 			case 'd':
 				outfile = optarg;
 				break;	
+			case 'w':
+				wait_ms_str = optarg;
+				break;
 		}
 	}
 
 	if(qname == NULL) {
 		fprintf(stderr, "error: -q <queue> required\n");
 		goto usage;
+	}
+
+	if(wait_ms_str) {
+		char *endptr;
+		errno = 0;
+		wait_ms = strtoul(wait_ms_str, &endptr, 0);
+		if((endptr == wait_ms_str) ||
+		   (wait_ms == 0 && errno == ERANGE) ||
+		   (errno == EINVAL)) {
+			fprintf(stderr, "error: <wait-ms> must be positive integer: %s\n",
+			        wait_ms_str);
+			goto usage;
+		}
 	}
 
 	if(outfile && infile) {
@@ -95,7 +114,7 @@ usage:
 		if((rc = fsq_enq(&q, buf, buflen))) {
 			fprintf(stderr, "error: fsq_enq() returned %d (errno=%d, %s)\n",
 			        rc, errno, strerror(errno));
-			return 1;
+			return 2;
 		}
 
 		free(buf);
@@ -113,11 +132,14 @@ usage:
 			return 1;
 		}
 
-		if((rc = fsq_deq(&q, -1U, &buf, &buflen))) {
-			if(rc != -1)
+		if((rc = fsq_deq(&q, wait_ms, &buf, &buflen))) {
+			if(rc != -1) {
 				fprintf(stderr, "error: fsq_deq() returned %d (errno=%d, %s)\n",
 				        rc, errno, strerror(errno));
-			return 1;
+				return 2;
+			} else {
+				return 1;
+			}
 		}
 
 		bufstream = fmemopen(buf, buflen, "rb");
