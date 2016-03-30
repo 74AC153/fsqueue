@@ -154,6 +154,16 @@ static struct timespec timespec_add(struct timespec x, struct timespec y)
 	return ret;
 }
 
+static struct timespec timespec_add_ms(struct timespec x, unsigned long ms)
+{
+	return timespec_add(
+		x,
+		(struct timespec){
+			.tv_sec = ms / 1000, 
+			.tv_nsec = (ms % 1000) * 1000000
+		});
+}
+
 // return lhs >= rhs
 static _Bool timespec_geq(struct timespec lhs, struct timespec rhs)
 {
@@ -182,22 +192,15 @@ static int fsq_is_locked(struct fsq *q, _Bool *locked)
 }
 #endif
 
-// timeout_ms can me -1U, in which case wait is forever
+// timeout_ms can be -1U, in which case wait is forever
 #define POLL_INTERVAL_US 100000
-static int fsq_lock(struct fsq *q, unsigned timeout_ms)
+static int fsq_lock(struct fsq *q, struct timespec *timeout)
 {
 	int status = 0;
 
-	struct timespec ts, timeout;
+	struct timespec ts;
 	if(clock_gettime(CLOCK_REALTIME, &ts))
 		return -2;
-
-	timeout = timespec_add(
-		ts,
-		(struct timespec){
-			.tv_sec = timeout_ms / 1000, 
-			.tv_nsec = (timeout_ms % 1000) * 1000000
-		});
 
 again:
 	while(1) {
@@ -210,11 +213,11 @@ again:
 		}
 		usleep(POLL_INTERVAL_US);
 
-		if(timeout_ms != -1U) {
+		if(timeout) {
 			if(clock_gettime(CLOCK_REALTIME, &ts))
 				return -4;
 	
-			if(timespec_geq(ts, timeout))
+			if(timespec_geq(ts, *timeout))
 				return -1;
 		}
 	}
@@ -256,7 +259,8 @@ int fsq_enq(struct fsq *q, const char *buf, size_t buflen)
 	uint64_t idx;
 	int fd = -1;
 
-	fsq_lock(q, -1U);
+	if(fsq_lock(q, NULL)) // NB: will not timeout
+		return -2;
 
 	idx = be64toh(*(uint64_t *)q->wr_idx_base);
 
@@ -264,7 +268,7 @@ int fsq_enq(struct fsq *q, const char *buf, size_t buflen)
 
 	fd = openat(q->data_dirfd, name, O_CREAT | O_WRONLY, 0644);
 	if(fd < 0) {
-		status = -1;
+		status = -3;
 		goto error;
 	}
 
@@ -272,12 +276,12 @@ int fsq_enq(struct fsq *q, const char *buf, size_t buflen)
 	while((wstatus = write(fd, buf, buflen)) < 0) {
 		if(errno == EINTR)
 			continue;
-		status = -2;
+		status = -4;
 		goto error;
 	}
 
 	if(wstatus != (ssize_t)buflen) {
-		status = -3;
+		status = -5;
 		goto error;
 	}
 
@@ -298,7 +302,7 @@ error:
 	goto done;
 }
 
-int fsq_deq(struct fsq *q, char **buf, size_t *buflen)
+int fsq_deq(struct fsq *q, unsigned timeout_ms, char **buf, size_t *buflen)
 {
 	int status = 0;
 	char name[32];
@@ -309,11 +313,34 @@ int fsq_deq(struct fsq *q, char **buf, size_t *buflen)
 	*buf = NULL;
 	*buflen = 0;
 
-	fsq_lock(q, -1U);
+	struct timespec ts, timeout;
+	if(clock_gettime(CLOCK_REALTIME, &ts))
+		return -2;
 
-	if(*(uint64_t*)q->wr_idx_base <= *(uint64_t*)q->rd_idx_base) {
-		fsq_unlock(q);
-		return -1;
+	timeout = timespec_add_ms(ts, timeout_ms);
+
+	int rc;
+	while(1) {
+		if((rc = fsq_lock(q, &timeout)) == -1)
+			return -1;
+		if(rc)
+			return -2;
+	
+		if(*(uint64_t*)q->wr_idx_base <= *(uint64_t*)q->rd_idx_base) {
+			fsq_unlock(q);
+		} else {
+			break;
+		}
+
+		usleep(POLL_INTERVAL_US);
+
+		if(timeout_ms != -1U) {
+			if(clock_gettime(CLOCK_REALTIME, &ts))
+				return -3;
+	
+			if(timespec_geq(ts, timeout))
+				return -1;
+		}
 	}
 
 	idx = be64toh(*(uint64_t *)q->rd_idx_base);
@@ -322,12 +349,12 @@ int fsq_deq(struct fsq *q, char **buf, size_t *buflen)
 
 	fd = openat(q->data_dirfd, name, O_RDONLY);
 	if(fd < 0) {
-		status = -2;
+		status = -4;
 		goto error;
 	}
 
 	if(fstat(fd, &sb)) {
-		status = -3;
+		status = -5;
 		goto error;
 	}
 
@@ -336,12 +363,12 @@ int fsq_deq(struct fsq *q, char **buf, size_t *buflen)
 	while(read(fd, *buf, *buflen) < 0) {
 		if(errno == EINTR)
 			continue;
-		status = -4;
+		status = -6;
 		goto error;
 	}
 
 	if(unlinkat(q->data_dirfd, name, 0)) {
-		status = -5;
+		status = -7;
 		goto error;
 	}
 
@@ -359,13 +386,4 @@ error:
 		*buflen = 0;
 	}
 	goto done;
-}
-
-int fsq_deq_wait(struct fsq *q, char **buf, size_t *buflen)
-{
-	int rc;
-	while((rc = fsq_deq(q, buf, buflen)) == -1) {
-		usleep(POLL_INTERVAL_US);
-	}
-	return rc;
 }

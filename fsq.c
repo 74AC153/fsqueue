@@ -113,7 +113,7 @@ usage:
 			return 1;
 		}
 
-		if((rc = fsq_deq_wait(&q, &buf, &buflen))) {
+		if((rc = fsq_deq(&q, -1U, &buf, &buflen))) {
 			if(rc != -1)
 				fprintf(stderr, "error: fsq_deq() returned %d (errno=%d, %s)\n",
 				        rc, errno, strerror(errno));
