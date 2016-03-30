@@ -1,6 +1,8 @@
 #if ! defined(FSQUEUE_H_INCLUDED)
 #define FSQUEUE_H_INCLUDED
 
+#include <time.h>
+
 struct fsq {
 	int dirfd;
 
@@ -18,6 +20,6 @@ int fsq_init(struct fsq *q);
 void fsq_close(struct fsq *q);
 
 int fsq_enq(struct fsq *q, const char *buf, size_t buflen);
-int fsq_deq(struct fsq *q, unsigned timeout_ms, char **buf, size_t *buflen);
+int fsq_deq(struct fsq *q, struct timespec *timeout, char **buf, size_t *buflen);
 
 #endif

@@ -140,30 +140,6 @@ void fsq_close(struct fsq *q)
 		close(q->data_dirfd);
 }
 
-static struct timespec timespec_add(struct timespec x, struct timespec y)
-{
-	struct timespec ret = {0, 0};
-
-	ret.tv_nsec = x.tv_nsec + y.tv_nsec;
-	if(ret.tv_nsec > 1000000000) {
-		ret.tv_sec++;
-		ret.tv_nsec -= 1000000000;
-	}
-	ret.tv_sec += x.tv_sec + y.tv_sec;
-
-	return ret;
-}
-
-static struct timespec timespec_add_ms(struct timespec x, unsigned long ms)
-{
-	return timespec_add(
-		x,
-		(struct timespec){
-			.tv_sec = ms / 1000, 
-			.tv_nsec = (ms % 1000) * 1000000
-		});
-}
-
 // return lhs >= rhs
 static _Bool timespec_geq(struct timespec lhs, struct timespec rhs)
 {
@@ -176,23 +152,6 @@ static _Bool timespec_geq(struct timespec lhs, struct timespec rhs)
 	return 0;
 }
 
-#if 0
-static int fsq_is_locked(struct fsq *q, _Bool *locked)
-{
-	struct stat sb;
-	*locked = 1;
-	if(fstatat(q->dirfd, ".lock", &sb, 0)) {
-		if(errno == ENOENT) {
-			*locked = 0;
-			return 0;
-		}
-		return -1;
-	}
-	return 0;
-}
-#endif
-
-// timeout_ms can be -1U, in which case wait is forever
 #define POLL_INTERVAL_US 100000
 static int fsq_lock(struct fsq *q, struct timespec *timeout)
 {
@@ -302,7 +261,7 @@ error:
 	goto done;
 }
 
-int fsq_deq(struct fsq *q, unsigned timeout_ms, char **buf, size_t *buflen)
+int fsq_deq(struct fsq *q, struct timespec *timeout, char **buf, size_t *buflen)
 {
 	int status = 0;
 	char name[32];
@@ -313,15 +272,13 @@ int fsq_deq(struct fsq *q, unsigned timeout_ms, char **buf, size_t *buflen)
 	*buf = NULL;
 	*buflen = 0;
 
-	struct timespec ts, timeout;
+	struct timespec ts;
 	if(clock_gettime(CLOCK_REALTIME, &ts))
 		return -2;
 
-	timeout = timespec_add_ms(ts, timeout_ms);
-
 	int rc;
 	while(1) {
-		if((rc = fsq_lock(q, &timeout)) == -1)
+		if((rc = fsq_lock(q, timeout)) == -1)
 			return -1;
 		if(rc)
 			return -2;
@@ -334,11 +291,11 @@ int fsq_deq(struct fsq *q, unsigned timeout_ms, char **buf, size_t *buflen)
 
 		usleep(POLL_INTERVAL_US);
 
-		if(timeout_ms != -1U) {
+		if(timeout) {
 			if(clock_gettime(CLOCK_REALTIME, &ts))
 				return -3;
 	
-			if(timespec_geq(ts, timeout))
+			if(timespec_geq(ts, *timeout))
 				return -1;
 		}
 	}

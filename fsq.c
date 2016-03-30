@@ -7,6 +7,29 @@
 
 #include "fsqueue.h"
 
+static struct timespec timespec_add(struct timespec x, struct timespec y)
+{
+	struct timespec ret = {0, 0};
+
+	ret.tv_nsec = x.tv_nsec + y.tv_nsec;
+	if(ret.tv_nsec > 1000000000) {
+		ret.tv_sec++;
+		ret.tv_nsec -= 1000000000;
+	}
+	ret.tv_sec += x.tv_sec + y.tv_sec;
+
+	return ret;
+}
+
+static struct timespec timespec_ms(unsigned long ms)
+{
+	struct timespec ret = {
+		.tv_sec = ms / 1000, 
+		.tv_nsec = (ms % 1000) * 1000000
+	};
+	return ret;
+}
+
 size_t fcopy(FILE *outstream, FILE *instream)
 {
 	size_t n, count = 0;
@@ -47,6 +70,7 @@ usage:
 				printf("omit -e and -d to create queue only.\n");
 				printf("if <infile> or <outfile> are \"--\", use stdin/stdout.\n");
 				printf("if -w <wait-ms> is omitted, wait forever.\n");
+				printf("exit code 1 on error, 2 on timeout\n");
 				return opt != 'h';
 			case 'q':
 				qname = optarg;
@@ -87,7 +111,7 @@ usage:
 	}
 
 	if((rc = fsq_openat(AT_FDCWD, qname, &q))) {
-		fprintf(stderr, "error: fsq_openat() returned %d (errno=%d, %s)\n",
+		fprintf(stderr, "error: fsq_openat(<queue>) returned %d (errno=%d, %s)\n",
 		        rc, errno, strerror(errno));
 		return 1;
 	}
@@ -114,7 +138,7 @@ usage:
 		if((rc = fsq_enq(&q, buf, buflen))) {
 			fprintf(stderr, "error: fsq_enq() returned %d (errno=%d, %s)\n",
 			        rc, errno, strerror(errno));
-			return 2;
+			return 1;
 		}
 
 		free(buf);
@@ -132,13 +156,22 @@ usage:
 			return 1;
 		}
 
-		if((rc = fsq_deq(&q, wait_ms, &buf, &buflen))) {
+		struct timespec now, timeout, *ptimeout = NULL;
+
+		if(wait_ms_str) {
+			if(clock_gettime(CLOCK_REALTIME, &now))
+				return 1;
+			timeout = timespec_add(now, timespec_ms(wait_ms));
+			ptimeout = &timeout;
+		}
+
+		if((rc = fsq_deq(&q, ptimeout, &buf, &buflen))) {
 			if(rc != -1) {
 				fprintf(stderr, "error: fsq_deq() returned %d (errno=%d, %s)\n",
 				        rc, errno, strerror(errno));
-				return 2;
-			} else {
 				return 1;
+			} else {
+				return 2;
 			}
 		}
 
