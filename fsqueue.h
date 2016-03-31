@@ -20,7 +20,7 @@ struct fsq {
 	size_t head_buflen;
 };
 
-int fsq_openat(int dirfd, const char *path, struct fsq *q);
+int fsq_openat(struct fsq *q, int dirfd, const char *path);
 int fsq_init(struct fsq *q);
 void fsq_close(struct fsq *q);
 

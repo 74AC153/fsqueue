@@ -110,7 +110,7 @@ usage:
 		goto usage;
 	}
 
-	if((rc = fsq_openat(AT_FDCWD, qname, &q))) {
+	if((rc = fsq_openat(&q, AT_FDCWD, qname))) {
 		fprintf(stderr, "error: fsq_openat(<queue>) returned %d (errno=%d, %s)\n",
 		        rc, errno, strerror(errno));
 		return 1;

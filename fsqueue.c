@@ -27,7 +27,7 @@ static void fsq_struct_init(struct fsq *q)
 	q->head_buflen = 0;
 }
 
-int fsq_openat(int dirfd, const char *path, struct fsq *q)
+int fsq_openat(struct fsq *q, int dirfd, const char *path)
 {
 	int status = 0;
 
