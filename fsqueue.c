@@ -158,9 +158,19 @@ static _Bool timespec_geq(struct timespec lhs, struct timespec rhs)
 }
 
 #define POLL_INTERVAL_US 100000
-static int fsq_lock(struct fsq *q, struct timespec *timeout)
+enum lock_type {
+	LOCK_READ,
+	LOCK_WRITE
+};
+static int fsq_lock(struct fsq *q, struct timespec *timeout, enum lock_type type)
 {
 	int status = 0;
+
+	char *lock_name = NULL;
+	if(type == LOCK_READ)
+		lock_name = "rdlock";
+	else
+		lock_name = "wrlock";
 
 	struct timespec ts;
 	if(clock_gettime(CLOCK_REALTIME, &ts))
@@ -169,7 +179,8 @@ static int fsq_lock(struct fsq *q, struct timespec *timeout)
 again:
 	while(1) {
 		struct stat sb;
-		if(fstatat(q->dirfd, ".lock", &sb, 0)) {
+			
+		if(fstatat(q->dirfd, lock_name, &sb, 0)) {
 			if(errno == ENOENT)
 				break;
 			status = -3;
@@ -186,7 +197,7 @@ again:
 		}
 	}
 
-	int fd = openat(q->dirfd, ".lock", O_RDWR | O_CREAT | O_EXCL, 0644);
+	int fd = openat(q->dirfd, lock_name, O_RDWR | O_CREAT | O_EXCL, 0644);
 	if(fd < 0) {
 		if(errno == EEXIST)
 			goto again;
@@ -204,11 +215,17 @@ error:
 	goto done;
 }
 
-static int fsq_unlock(struct fsq *q)
+static int fsq_unlock(struct fsq *q, enum lock_type type)
 {
 	int status = 0;
 
-	if(unlinkat(q->dirfd, ".lock", 0))
+	char *lock_name = NULL;
+	if(type == LOCK_READ)
+		lock_name = "rdlock";
+	else
+		lock_name = "wrlock";
+
+	if(unlinkat(q->dirfd, lock_name, 0))
 		if(errno != ENOENT)
 			status = -1;
 
@@ -220,7 +237,7 @@ int fsq_enq(struct fsq *q, const char *buf, size_t buflen)
 	int status = 0;
 	int fd = -1;
 
-	if(fsq_lock(q, NULL)) // NB: will not timeout
+	if(fsq_lock(q, NULL, LOCK_WRITE)) // NB: will not timeout
 		return -2;
 
 	uint64_t idx = be64toh(*q->wr_idx_base);
@@ -264,7 +281,7 @@ int fsq_enq(struct fsq *q, const char *buf, size_t buflen)
 	}
 	
 done:
-	fsq_unlock(q);
+	fsq_unlock(q, LOCK_WRITE);
 
 	if(fd >= 0)
 		close(fd);
@@ -289,14 +306,14 @@ int fsq_head(struct fsq *q, struct timespec *timeout, const char **buf, size_t *
 
 	while(1) {
 		int rc;
-		if((rc = fsq_lock(q, timeout)) == -1)
+		if((rc = fsq_lock(q, timeout, LOCK_READ)) == -1)
 			return -1;
 		if(rc)
 			return -2;
 	
 		if(*q->wr_idx_base <= *q->rd_idx_base) {
 			// empty queue -- unlock and sleep to try again later
-			fsq_unlock(q);
+			fsq_unlock(q, LOCK_READ);
 		} else {
 			break;
 		}
@@ -409,7 +426,7 @@ int fsq_advance(struct fsq *q)
 
 
 done:
-	fsq_unlock(q);
+	fsq_unlock(q, LOCK_READ);
 	return status;
 
 error:
@@ -419,7 +436,11 @@ error:
 int fsq_recover(struct fsq *q)
 {
 	// clean up lock
-	return fsq_unlock(q);
+	if(fsq_unlock(q, LOCK_READ))
+		return -1;
+	if(fsq_unlock(q, LOCK_WRITE))
+		return -2;
+	return 0;
 }
 
 int fsq_deq(struct fsq *q, struct timespec *timeout, char **buf, size_t *buflen)
