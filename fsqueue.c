@@ -13,14 +13,22 @@
 
 #include "fsqueue.h"
 
+#define FSQ_OK 0
+#define FSQ_TIMEOUT -1
+#define FSQ_SYS_ERR -2
+#define FSQ_INTERNAL_ERR -3
+#define FSQ_USER_ERR -4
+
+static int __attribute__((noinline)) _gen_err(int val)
+{
+	return val;
+}
 
 static void fsq_struct_init(struct fsq *q)
 {
 	q->dirfd = -1;
 	q->rd_idx_fd = -1;
-	q->rd_idx_base = MAP_FAILED;
 	q->wr_idx_fd = -1;
-	q->wr_idx_base = MAP_FAILED;
 	q->data_dirfd = -1;
 	q->head_fd = -1;
 	q->head_buf = MAP_FAILED;
@@ -35,58 +43,40 @@ int fsq_openat(struct fsq *q, int dirfd, const char *path)
 
 	q->dirfd = openat(dirfd, path, O_RDONLY | O_DIRECTORY);
 	if(q->dirfd < 0) {
-		status = -1;
+		status = _gen_err(FSQ_USER_ERR);
 		goto error;
 	}
 
 	q->rd_idx_fd = openat(q->dirfd, "rd_idx", O_CREAT | O_RDWR, 0644);
 	if(q->rd_idx_fd < 0) {
-		status = -2;
+		status = _gen_err(FSQ_SYS_ERR);
 		goto error;
 	}
 	if(ftruncate(q->rd_idx_fd, sizeof(uint64_t))) {
-		status = -3;
+		status = _gen_err(FSQ_SYS_ERR);
 		goto error;
 	}
 
 	q->wr_idx_fd = openat(q->dirfd, "wr_idx", O_CREAT | O_RDWR, 0644);
 	if(q->wr_idx_fd < 0) {
-		status = -4;
+		status = _gen_err(FSQ_SYS_ERR);
 		goto error;
 	}
 	if(ftruncate(q->wr_idx_fd, sizeof(uint64_t))) {
-		status = -5;
+		status = _gen_err(FSQ_SYS_ERR);
 		goto error;
 	}
 
 	if(mkdirat(q->dirfd, "data", 0755)) {
 		if(errno != EEXIST) {
-			status = -6;
+			status = _gen_err(FSQ_SYS_ERR);
 			goto error;
 		}
 	}
 
 	q->data_dirfd = openat(q->dirfd, "data", O_RDONLY | O_DIRECTORY);
 	if(q->data_dirfd < 0) {
-		status = -7;
-		goto error;
-	}
-
-	q->rd_idx_base =
-		mmap(NULL, sizeof(*q->rd_idx_base),
-		     PROT_READ | PROT_WRITE, MAP_SHARED,
-		     q->rd_idx_fd, 0);
-	if(q->rd_idx_base == MAP_FAILED) {
-		status = -8;
-		goto error;
-	}
-
-	q->wr_idx_base =
-		mmap(NULL, sizeof(*q->wr_idx_base),
-		     PROT_READ | PROT_WRITE, MAP_SHARED,
-		     q->wr_idx_fd, 0);
-	if(q->wr_idx_base == MAP_FAILED) {
-		status = -9;
+		status = _gen_err(FSQ_SYS_ERR);
 		goto error;
 	}
 
@@ -98,22 +88,46 @@ error:
 	goto done;
 }
 
+static int read_idx(int fd, uint64_t *val)
+{
+	if(lseek(fd, 0, SEEK_SET))
+		return _gen_err(FSQ_SYS_ERR);
+	ssize_t rc;
+	while((rc = read(fd, val, sizeof(*val))) < 0)
+		if(errno != EINTR)
+			break;
+	if(rc < 0)
+		return _gen_err(FSQ_SYS_ERR);
+	if(rc != sizeof(*val))
+		return _gen_err(FSQ_INTERNAL_ERR);
+	*val = be64toh(*val);
+	return FSQ_OK; 
+}
+
+static int write_idx(int fd, uint64_t val)
+{
+	int rc;
+	if(lseek(fd, 0, SEEK_SET))
+		return _gen_err(FSQ_SYS_ERR);
+	val = htobe64(val);
+	while((rc = write(fd, &val, sizeof(val))) < 0)
+		if(errno != EINTR)
+			break;;
+	if(rc < 0)
+		return _gen_err(FSQ_SYS_ERR);
+	if(rc != sizeof(val))
+		return _gen_err(FSQ_INTERNAL_ERR);
+	return FSQ_OK;
+}
+
+
 int fsq_init(struct fsq *q)
 {
-	int status = 0;
-
-	memset(q->rd_idx_base, 0, sizeof(*q->rd_idx_base));
-	memset(q->wr_idx_base, 0, sizeof(*q->wr_idx_base));
-
-	{
-		struct timespec times[2] = {
-			[0] = { .tv_sec = 0, .tv_nsec = UTIME_OMIT }, // atime
-			[1] = { .tv_sec = 0, .tv_nsec = UTIME_NOW } // mtime
-		};
-		// since this is only advisory, ignore failures
-		futimens(q->rd_idx_fd, times);
-		futimens(q->wr_idx_fd, times);
-	}
+	int status = FSQ_OK;
+	if((status = write_idx(q->wr_idx_fd, 0)))
+		return status;
+	if((status = write_idx(q->rd_idx_fd, 0)))
+		return status;
 
 	return status;
 }
@@ -123,14 +137,8 @@ void fsq_close(struct fsq *q)
 	if(q->dirfd >= 0)
 		close(q->dirfd);
 
-	if(q->rd_idx_base != MAP_FAILED)
-		munmap(q->rd_idx_base, sizeof(*q->rd_idx_base));
-
 	if(q->rd_idx_fd >= 0)
 		close(q->rd_idx_fd);
-
-	if(q->wr_idx_base != MAP_FAILED)
-		munmap(q->wr_idx_base, sizeof(*q->wr_idx_base));
 
 	if(q->wr_idx_fd >= 0)
 		close(q->wr_idx_fd);
@@ -164,7 +172,7 @@ enum lock_type {
 };
 static int fsq_lock(struct fsq *q, struct timespec *timeout, enum lock_type type)
 {
-	int status = 0;
+	int status = FSQ_OK;
 
 	char *lock_name = NULL;
 	if(type == LOCK_READ)
@@ -174,7 +182,7 @@ static int fsq_lock(struct fsq *q, struct timespec *timeout, enum lock_type type
 
 	struct timespec ts;
 	if(clock_gettime(CLOCK_REALTIME, &ts))
-		return -2;
+		return _gen_err(FSQ_SYS_ERR);
 
 again:
 	while(1) {
@@ -183,17 +191,17 @@ again:
 		if(fstatat(q->dirfd, lock_name, &sb, 0)) {
 			if(errno == ENOENT)
 				break;
-			status = -3;
+			status = _gen_err(FSQ_SYS_ERR);
 			goto error;
 		}
 		usleep(POLL_INTERVAL_US);
 
 		if(timeout) {
 			if(clock_gettime(CLOCK_REALTIME, &ts))
-				return -4;
+				return _gen_err(FSQ_SYS_ERR);
 	
 			if(timespec_geq(ts, *timeout))
-				return -1;
+				return FSQ_TIMEOUT;
 		}
 	}
 
@@ -202,7 +210,7 @@ again:
 		if(errno == EEXIST)
 			goto again;
 
-		status = -5;
+		status = _gen_err(FSQ_SYS_ERR);
 		goto error;
 	}
 
@@ -217,7 +225,7 @@ error:
 
 static int fsq_unlock(struct fsq *q, enum lock_type type)
 {
-	int status = 0;
+	int status = FSQ_OK;
 
 	char *lock_name = NULL;
 	if(type == LOCK_READ)
@@ -227,50 +235,57 @@ static int fsq_unlock(struct fsq *q, enum lock_type type)
 
 	if(unlinkat(q->dirfd, lock_name, 0))
 		if(errno != ENOENT)
-			status = -1;
+			status = _gen_err(FSQ_SYS_ERR);
 
 	return status;
 }
 
 int fsq_enq(struct fsq *q, const char *buf, size_t buflen)
 {
-	int status = 0;
+	int status = FSQ_OK;
 	int fd = -1;
 
-	if(fsq_lock(q, NULL, LOCK_WRITE)) // NB: will not timeout
-		return -2;
+	if((status = fsq_lock(q, NULL, LOCK_WRITE))) // NB: will not timeout
+		return status;
 
-	uint64_t idx = be64toh(*q->wr_idx_base);
+	uint64_t wr_idx;
+	if((status = read_idx(q->wr_idx_fd, &wr_idx)))
+		goto error;
 
 	{
 		char name[32];
-		snprintf(name, sizeof(name), "%16.16" PRIx64, idx);
+		snprintf(name, sizeof(name), "%16.16" PRIx64, wr_idx);
 		fd = openat(q->data_dirfd, name, O_CREAT | O_WRONLY, 0644);
 		if(fd < 0) {
-			status = -3;
+			status = _gen_err(FSQ_SYS_ERR);
 			goto error;
 		}
 	}
 
 	ssize_t wstatus = 0;
 	while((wstatus = write(fd, buf, buflen)) < 0) {
-		if(errno == EINTR)
-			continue;
-		status = -4;
+		if(errno != EINTR)
+			break;
+		status = _gen_err(FSQ_SYS_ERR);
+		goto error;
+	}
+	if(wstatus < 0) {
+		status = _gen_err(FSQ_SYS_ERR);
+		goto error;
+	}
+	if(wstatus != (ssize_t)buflen) {
+		status = _gen_err(FSQ_INTERNAL_ERR);
 		goto error;
 	}
 	// in case of overwrite of existing data file
 	if(ftruncate(fd, buflen)) {
-		status = -5;
+		status = _gen_err(FSQ_SYS_ERR);
 		goto error;
 	}
 
-	if(wstatus != (ssize_t)buflen) {
-		status = -6;
+	if((status = write_idx(q->wr_idx_fd, wr_idx+1)))
 		goto error;
-	}
 
-	*q->wr_idx_base = htobe64(idx+1);
 	{
 		struct timespec times[2] = {
 			[0] = { .tv_sec = 0, .tv_nsec = UTIME_OMIT }, // atime
@@ -281,10 +296,11 @@ int fsq_enq(struct fsq *q, const char *buf, size_t buflen)
 	}
 	
 done:
-	fsq_unlock(q, LOCK_WRITE);
+	status = fsq_unlock(q, LOCK_WRITE);
 
 	if(fd >= 0)
 		close(fd);
+
 	return status;
 
 error:
@@ -305,41 +321,49 @@ int fsq_head(struct fsq *q, struct timespec *timeout, const char **buf, size_t *
 	// try to acquire queue lock
 
 	while(1) {
-		int rc;
-		if((rc = fsq_lock(q, timeout, LOCK_READ)) == -1)
-			return -1;
-		if(rc)
-			return -2;
+		if((status = fsq_lock(q, timeout, LOCK_READ)))
+			return status;
+
+		uint64_t wr_idx, rd_idx;
+		if((status = read_idx(q->rd_idx_fd, &rd_idx)))
+			goto error;
+
+		if((status = read_idx(q->wr_idx_fd, &wr_idx)))
+			goto error;
 	
-		if(*q->wr_idx_base <= *q->rd_idx_base) {
-			// empty queue -- unlock and sleep to try again later
-			fsq_unlock(q, LOCK_READ);
-		} else {
-			break;
-		}
+		if(wr_idx > rd_idx)
+			break; // queue is not empty
+
+		// queue empty: unlock and sleep
+		if((status = fsq_unlock(q, LOCK_READ)))
+			goto error;
 
 		usleep(POLL_INTERVAL_US);
 
 		if(timeout) {
 			struct timespec ts;
 			if(clock_gettime(CLOCK_REALTIME, &ts))
-				return -3;
+				return _gen_err(FSQ_SYS_ERR);
 	
 			if(timespec_geq(ts, *timeout))
-				return -1;
+				return FSQ_TIMEOUT;
 		}
 	}
 
 	// map head of queue into memory
 
 	{
-		uint64_t idx = be64toh(*q->rd_idx_base);
+		uint64_t rd_idx;
+		if((status = read_idx(q->rd_idx_fd, &rd_idx))) {
+			goto error;
+		}
+
 		char name[32];
-		snprintf(name, sizeof(name), "%16.16" PRIx64, idx);
+		snprintf(name, sizeof(name), "%16.16" PRIx64, rd_idx);
 	
 		q->head_fd = openat(q->data_dirfd, name, O_RDONLY);
 		if(q->head_fd < 0) {
-			status = -4;
+			status = _gen_err(FSQ_SYS_ERR);
 			goto error;
 		}
 	}
@@ -347,7 +371,7 @@ int fsq_head(struct fsq *q, struct timespec *timeout, const char **buf, size_t *
 	{
 		struct stat sb;
 		if(fstat(q->head_fd, &sb)) {
-			status = -5;
+			status = _gen_err(FSQ_SYS_ERR);
 			goto error;
 		}
 		q->head_buflen = sb.st_size;
@@ -358,7 +382,7 @@ int fsq_head(struct fsq *q, struct timespec *timeout, const char **buf, size_t *
 		     PROT_READ, MAP_SHARED,
 		     q->head_fd, 0);
 	if(q->head_buf == MAP_FAILED) {
-		status = -8;
+		status = _gen_err(FSQ_SYS_ERR);
 		goto error;
 	}
 
@@ -389,20 +413,16 @@ int fsq_advance(struct fsq *q)
 
 	// short-circuit repeated calls to fsq_advance without an fsq_head between
 	if(q->head_fd < 0)
-		return 0;
+		return FSQ_OK;
 
 	// advance queue read index
 
-	uint64_t idx = be64toh(*q->rd_idx_base);
-	*q->rd_idx_base = htobe64(idx+1);
-	{
-		struct timespec times[2] = {
-			[0] = { .tv_sec = 0, .tv_nsec = UTIME_OMIT }, // atime
-			[1] = { .tv_sec = 0, .tv_nsec = UTIME_NOW } // mtime
-		};
-		// since this is only advisory, ignore failures
-		futimens(q->rd_idx_fd, times);
-	}
+	uint64_t rd_idx;
+	if((status = read_idx(q->rd_idx_fd, &rd_idx)))
+		return status;
+
+	if((status = write_idx(q->rd_idx_fd, rd_idx+1)))
+		return status;
 
 	// clean up stale queue head buffer
 
@@ -417,9 +437,9 @@ int fsq_advance(struct fsq *q)
 
 	{
 		char name[32];
-		snprintf(name, sizeof(name), "%16.16" PRIx64, idx);
+		snprintf(name, sizeof(name), "%16.16" PRIx64, rd_idx);
 		if(unlinkat(q->data_dirfd, name, 0)) {
-			status = -7;
+			status = _gen_err(FSQ_SYS_ERR);
 			goto error;
 		}
 	}
@@ -435,29 +455,27 @@ error:
 
 int fsq_recover(struct fsq *q)
 {
+	int status = 0;
 	// clean up lock
-	if(fsq_unlock(q, LOCK_READ))
-		return -1;
-	if(fsq_unlock(q, LOCK_WRITE))
-		return -2;
-	return 0;
+	if((status = fsq_unlock(q, LOCK_READ)))
+		return status;
+	if((status = fsq_unlock(q, LOCK_WRITE)))
+		return status;
+	return FSQ_OK;
 }
 
 int fsq_deq(struct fsq *q, struct timespec *timeout, char **buf, size_t *buflen)
 {
 	const char* temp_buf;
-	int rc;
-	if((rc = fsq_head(q, timeout, &temp_buf, buflen)) == -1)
-		return -1;
-	if(rc)
-		return (rc << 16) | (-2 & 0xFFFF);
+	int status = FSQ_OK;
+	if((status = fsq_head(q, timeout, &temp_buf, buflen)))
+		return status;
 
 	*buf = malloc(*buflen);
 	memcpy(*buf, temp_buf, *buflen);
 
-	rc = fsq_advance(q);
-	if(rc)
-		return (rc << 16) | (-3 & 0xFFFF);
+	if((status = fsq_advance(q)))
+		return status;
 
-	return 0;
+	return status;
 }

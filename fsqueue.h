@@ -8,10 +8,7 @@ struct fsq {
 	int dirfd;
 
 	int rd_idx_fd;
-	uint64_t *rd_idx_base;
-
 	int wr_idx_fd;
-	uint64_t *wr_idx_base;
 
 	int data_dirfd;
 
