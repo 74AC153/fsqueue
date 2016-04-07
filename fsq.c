@@ -110,7 +110,7 @@ usage:
 		goto usage;
 	}
 
-	if((rc = fsq_openat(&q, AT_FDCWD, qname))) {
+	if((rc = fsq_open(&q, qname))) {
 		fprintf(stderr, "error: fsq_openat(<queue>) returned %d (errno=%d, %s)\n",
 		        rc, errno, strerror(errno));
 		return 1;
@@ -182,13 +182,6 @@ usage:
 			fclose(outstream);
 
 		free(buf);
-
-	} else {
-		if((rc = fsq_init(&q))) {
-			fprintf(stderr, "error: fsq_init() returned %d (errno=%d, %s)\n",
-			        rc, errno, strerror(errno));
-			return 1;
-		}
 	}
 
 	fsq_close(&q);
