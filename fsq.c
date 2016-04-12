@@ -53,7 +53,6 @@ int main(int argc, char *argv[])
 	char *outfile = NULL;
 	char *wait_ms_str = NULL;
 
-	struct fsq q;
 	int rc;
 	char *buf = NULL;
 	size_t buflen = 0;
@@ -110,13 +109,14 @@ usage:
 		goto usage;
 	}
 
-	if((rc = fsq_open(&q, qname))) {
-		fprintf(stderr, "error: fsq_openat(<queue>) returned %d (errno=%d, %s)\n",
-		        rc, errno, strerror(errno));
-		return 1;
-	}
-
 	if(infile) {
+		struct fsq_produce q;
+		if((rc = fsq_produce_open(&q, qname))) {
+			fprintf(stderr, "error: fsq_openat(<queue>) returned %d (errno=%d, %s)\n",
+			        rc, errno, strerror(errno));
+			return 1;
+		}
+
 		FILE *instream = NULL;
 
 		if(strcmp(infile, "--") == 0)
@@ -142,8 +142,15 @@ usage:
 		}
 
 		free(buf);
+		fsq_produce_close(&q);
 
 	} else if(outfile) {
+		struct fsq_consume q;
+		if((rc = fsq_consume_open(&q, qname))) {
+			fprintf(stderr, "error: fsq_openat(<queue>) returned %d (errno=%d, %s)\n",
+			        rc, errno, strerror(errno));
+			return 1;
+		}
 		FILE *outstream = NULL;
 
 		if(strcmp(outfile, "--") == 0)
@@ -182,9 +189,10 @@ usage:
 			fclose(outstream);
 
 		free(buf);
+
+		fsq_consume_close(&q);
 	}
 
-	fsq_close(&q);
 
 	return 0;
 }
