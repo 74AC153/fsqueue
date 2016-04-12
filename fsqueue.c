@@ -97,6 +97,7 @@ static int set_idx(int dirfd, const char *path, uint64_t val)
 	else if(rc != sizeof(val))
 		status = _gen_err(FSQ_INTERNAL_ERR);
 
+	close(fd);
 	return status;
 }
 
