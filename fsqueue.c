@@ -15,13 +15,6 @@
 
 #include "fsqueue.h"
 
-#define FSQ_OK 0
-#define FSQ_TIMEOUT -1
-#define FSQ_SYS_ERR -2
-#define FSQ_INTERNAL_ERR -3
-#define FSQ_USER_ERR -4
-#define FSQ_NOENT -5
-
 #define RD_IDX_NAME "rd_idx"
 #define WR_IDX_NAME "wr_idx"
 #define DATA_DIR_NAME "data"

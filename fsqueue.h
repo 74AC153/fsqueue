@@ -5,6 +5,12 @@
 #include <time.h>
 #include <pthread.h>
 
+#define FSQ_OK 0
+#define FSQ_TIMEOUT -1
+#define FSQ_SYS_ERR -2
+#define FSQ_INTERNAL_ERR -3
+#define FSQ_USER_ERR -4
+
 struct fsq_produce {
 	int dirfd;
 	int data_dirfd;
