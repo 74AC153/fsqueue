@@ -418,19 +418,3 @@ int fsq_advance(struct fsq_consume *q)
 
 	return status;
 }
-
-int fsq_deq(struct fsq_consume *q, struct timespec *timeout, char **buf, size_t *buflen)
-{
-	const char* temp_buf;
-	int status = FSQ_OK;
-	if((status = fsq_head(q, timeout, &temp_buf, buflen)))
-		return status;
-
-	*buf = malloc(*buflen);
-	memcpy(*buf, temp_buf, *buflen);
-
-	if((status = fsq_advance(q)))
-		return status;
-
-	return status;
-}

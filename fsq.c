@@ -7,6 +7,26 @@
 
 #include "fsqueue.h"
 
+void print_fsq_err(char *fn_name, int rc)
+{
+	switch(rc) {
+	case FSQ_OK:
+		break;
+	case FSQ_TIMEOUT:
+		fprintf(stderr, "%s() failed (timeout)\n", fn_name); break;
+	case FSQ_SYS_ERR:
+		fprintf(stderr, "%s() failed (errno=%d: %s)\n",
+		       fn_name, errno, strerror(errno));
+		break;
+	case FSQ_INTERNAL_ERR:
+		fprintf(stderr, "%s() failed (internal err)\n", fn_name); break;
+	case FSQ_USER_ERR:
+		fprintf(stderr, "%s() failed (user err)\n", fn_name); break;
+	default:
+		fprintf(stderr, "%s() failed error=%d\n", fn_name, rc); break;
+	}
+}
+
 static struct timespec timespec_add(struct timespec x, struct timespec y)
 {
 	struct timespec ret = {0, 0};
@@ -54,8 +74,6 @@ int main(int argc, char *argv[])
 	char *wait_ms_str = NULL;
 
 	int rc;
-	char *buf = NULL;
-	size_t buflen = 0;
 	FILE *bufstream = NULL;
 	unsigned long wait_ms = -1UL;
 
@@ -129,6 +147,8 @@ usage:
 			return 1;
 		}
 
+		char *buf = NULL;
+		size_t buflen = 0;
 		bufstream = open_memstream(&buf, &buflen);
 		fcopy(bufstream, instream);
 		fclose(bufstream);
@@ -172,23 +192,27 @@ usage:
 			ptimeout = &timeout;
 		}
 
-		if((rc = fsq_deq(&q, ptimeout, &buf, &buflen))) {
-			if(rc != -1) {
-				fprintf(stderr, "error: fsq_deq() returned %d (errno=%d, %s)\n",
-				        rc, errno, strerror(errno));
-				return 1;
-			} else {
-				return 2;
-			}
+		const char *buf = NULL;
+		size_t buflen = 0;
+		rc = fsq_head(&q, ptimeout, &buf, &buflen);
+		if(rc == FSQ_TIMEOUT) {
+			return 2;
+		} else if(rc) {
+			print_fsq_err("fsq_head", rc);
+			return 1;
 		}
 
-		bufstream = fmemopen(buf, buflen, "rb");
+		bufstream = fmemopen((void*)buf, buflen, "rb");
 		fcopy(outstream, bufstream);
 		fclose(bufstream);
 		if(outstream != stdout)
 			fclose(outstream);
 
-		free(buf);
+		rc = fsq_advance(&q);
+		if(rc) {
+			print_fsq_err("fsq_head", rc);
+			return 1;
+		}
 
 		fsq_consume_close(&q);
 	}
