@@ -22,6 +22,8 @@ void print_fsq_err(char *fn_name, int rc)
 		fprintf(stderr, "%s() failed (internal err)\n", fn_name); break;
 	case FSQ_USER_ERR:
 		fprintf(stderr, "%s() failed (user err)\n", fn_name); break;
+	case FSQ_IN_USE:
+		fprintf(stderr, "%s() failed (already in use)\n", fn_name); break;
 	default:
 		fprintf(stderr, "%s() failed error=%d\n", fn_name, rc); break;
 	}
@@ -65,6 +67,8 @@ size_t fcopy(FILE *outstream, FILE *instream)
 
 int main(int argc, char *argv[])
 {
+	int status = 0;
+
 	if(argc == 1)
 		goto usage;
 
@@ -72,10 +76,10 @@ int main(int argc, char *argv[])
 	char *infile = NULL;
 	char *outfile = NULL;
 	char *wait_ms_str = NULL;
+	unsigned long wait_ms = -1UL;
 
 	int rc;
 	FILE *bufstream = NULL;
-	unsigned long wait_ms = -1UL;
 
 	int opt;
 	while((opt = getopt(argc, argv, "q:w:e:d:h")) != -1) {
@@ -129,13 +133,14 @@ usage:
 
 	if(infile) {
 		struct fsq_produce q;
+		FILE *instream = NULL;
+		char *buf = NULL;
+		size_t buflen = 0;
+
 		if((rc = fsq_produce_open(&q, qname))) {
-			fprintf(stderr, "error: fsq_openat(<queue>) returned %d (errno=%d, %s)\n",
-			        rc, errno, strerror(errno));
+			print_fsq_err("fsq_produce_open", rc);
 			return 1;
 		}
-
-		FILE *instream = NULL;
 
 		if(strcmp(infile, "--") == 0)
 			instream = stdin;
@@ -144,34 +149,42 @@ usage:
 
 		if(! instream) {
 			perror("error: fopen(<infile>)");
-			return 1;
+			status = 1;
+			goto produce_done;
 		}
 
-		char *buf = NULL;
-		size_t buflen = 0;
 		bufstream = open_memstream(&buf, &buflen);
+		if(! bufstream) {
+			perror("open_memstream()");
+			status = 1;
+			goto consume_done;
+		}
 		fcopy(bufstream, instream);
 		fclose(bufstream);
 		if(instream != stdin)
 			fclose(instream);
 
 		if((rc = fsq_enq(&q, buf, buflen))) {
-			fprintf(stderr, "error: fsq_enq() returned %d (errno=%d, %s)\n",
-			        rc, errno, strerror(errno));
-			return 1;
+			print_fsq_err("fsq_enq", rc);
+			status = 1;
+			goto produce_done;
 		}
 
+produce_done:
 		free(buf);
 		fsq_produce_close(&q);
 
 	} else if(outfile) {
 		struct fsq_consume q;
+		FILE *outstream = NULL;
+		struct timespec now, timeout, *ptimeout = NULL;
+		const char *buf = NULL;
+		size_t buflen = 0;
+
 		if((rc = fsq_consume_open(&q, qname))) {
-			fprintf(stderr, "error: fsq_openat(<queue>) returned %d (errno=%d, %s)\n",
-			        rc, errno, strerror(errno));
+			print_fsq_err("fsq_consume_open", rc);
 			return 1;
 		}
-		FILE *outstream = NULL;
 
 		if(strcmp(outfile, "--") == 0)
 			outstream = stdout;
@@ -180,29 +193,42 @@ usage:
 
 		if(! outstream) {
 			perror("error: fopen(<outfile>)");
-			return 1;
+			status = 1;
+			goto produce_done;
 		}
 
-		struct timespec now, timeout, *ptimeout = NULL;
-
 		if(wait_ms_str) {
-			if(clock_gettime(CLOCK_REALTIME, &now))
-				return 1;
+			if(clock_gettime(CLOCK_REALTIME, &now)) {
+				perror("clock_gettime()");
+				status = 1;
+				goto produce_done;
+			}
 			timeout = timespec_add(now, timespec_ms(wait_ms));
 			ptimeout = &timeout;
 		}
 
-		const char *buf = NULL;
-		size_t buflen = 0;
 		rc = fsq_head(&q, ptimeout, &buf, &buflen);
 		if(rc == FSQ_TIMEOUT) {
-			return 2;
-		} else if(rc) {
+			status = 2;
+			goto consume_done;
+		}
+		if(rc == FSQ_IN_USE) {
+			fprintf(stderr, "queue already in use\n");
+			status = 1;
+			goto consume_done;
+		}
+		if(rc) {
 			print_fsq_err("fsq_head", rc);
-			return 1;
+			status =  1;
+			goto consume_done;
 		}
 
 		bufstream = fmemopen((void*)buf, buflen, "rb");
+		if(! bufstream) {
+			perror("fmemopen()");
+			status = 1;
+			goto consume_done;
+		}
 		fcopy(outstream, bufstream);
 		fclose(bufstream);
 		if(outstream != stdout)
@@ -210,13 +236,14 @@ usage:
 
 		rc = fsq_advance(&q);
 		if(rc) {
-			print_fsq_err("fsq_head", rc);
-			return 1;
+			print_fsq_err("fsq_advance", rc);
+			status = 1;
+			goto consume_done;
 		}
 
+consume_done:
 		fsq_consume_close(&q);
 	}
 
-
-	return 0;
+	return status;
 }

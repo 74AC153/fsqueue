@@ -17,6 +17,8 @@
 
 #define RD_IDX_NAME "rd_idx"
 #define WR_IDX_NAME "wr_idx"
+#define RD_LOCK_NAME "rd_lock"
+#define WR_LOCK_NAME "wr_lock"
 #define DATA_DIR_NAME "data"
 
 static int __attribute__((noinline)) _gen_err(int val)
@@ -127,7 +129,16 @@ void *watch_thread_fn(void *arg)
 	return NULL;
 }
 
-int fsq_produce_open(struct fsq_produce *q, const char *path)
+static void _common_close(struct fsq_produce *q)
+{
+	if(q->dirfd >= 0)
+		close(q->dirfd);
+
+	if(q->data_dirfd >= 0)
+		close(q->data_dirfd);
+}
+
+static int _common_open(struct fsq_produce *q, const char *path)
 {
 	int status = FSQ_OK;
 
@@ -156,34 +167,75 @@ done:
 	return status;
 
 error:
-	fsq_produce_close(q);
+	_common_close(q);
 	goto done;
+}
 
+static int _lock(struct fsq_produce *q, char *which)
+{
+	int status = FSQ_OK;
+
+	int fd = openat(
+		q->dirfd, which, O_CREAT | O_WRONLY | O_EXCL, 0644);
+	if(fd < 0) {
+		if(errno == EEXIST)
+			status = _gen_err(FSQ_IN_USE);
+		else
+			status = _gen_err(FSQ_SYS_ERR);
+	} else {
+		close(fd);
+	}
+
+	return status;
+}
+
+static void _unlock(struct fsq_produce *q, char *which)
+{
+	unlinkat(q->dirfd, which, 0);
+}
+
+int fsq_produce_open(struct fsq_produce *q, const char *path)
+{
+	int status = FSQ_OK;
+
+	if((status = _common_open(q, path)))
+		return status;
+
+	if((status = _lock(q, WR_LOCK_NAME)))
+		goto error;
+
+done:
+	return status;
+
+error:
+	_common_close(q);
+	goto done;
 }
 
 void fsq_produce_close(struct fsq_produce *q)
 {
-	if(q->dirfd >= 0)
-		close(q->dirfd);
-
-	if(q->data_dirfd >= 0)
-		close(q->data_dirfd);
+	_unlock(q, WR_LOCK_NAME);
+	_common_close(q);
 }
 
 int fsq_consume_open(struct fsq_consume *q, const char *path)
 {
 	int status = FSQ_OK;
 
-	if((status = fsq_produce_open(&q->hdr, path)))
+	fsq_consume_struct_init(q);
+
+	if((status = _common_open(&q->hdr, path)))
 		return status;
 
-	fsq_consume_struct_init(q);
+	if((status = _lock(&q->hdr, RD_LOCK_NAME)))
+		goto error;
 
 	q->inotify_evt_q = inotify_init();
 	if(q->inotify_evt_q < 0) {
 		status = _gen_err(FSQ_SYS_ERR);
 		goto error;
 	}
+
 	q->inotify_wr_idx_wd =
 		inotify_add_watch(q->inotify_evt_q, path, IN_CLOSE_WRITE);
 	if(q->inotify_wr_idx_wd < 0) {
@@ -207,8 +259,6 @@ error:
 
 void fsq_consume_close(struct fsq_consume *q)
 {
-	fsq_produce_close(&q->hdr);
-
 	if(q->head_buf != MAP_FAILED)
 		munmap((char*)q->head_buf, q->head_buflen);
 
@@ -225,6 +275,10 @@ void fsq_consume_close(struct fsq_consume *q)
 
 	if(q->inotify_evt_q >= 0)
 		close(q->inotify_evt_q);
+
+	_unlock(&q->hdr, RD_LOCK_NAME);
+
+	_common_close(&q->hdr);
 }
 
 // return lhs >= rhs

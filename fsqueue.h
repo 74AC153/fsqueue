@@ -10,6 +10,7 @@
 #define FSQ_SYS_ERR -2
 #define FSQ_INTERNAL_ERR -3
 #define FSQ_USER_ERR -4
+#define FSQ_IN_USE -5
 
 struct fsq_produce {
 	int dirfd;
