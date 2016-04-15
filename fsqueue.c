@@ -129,7 +129,7 @@ void *watch_thread_fn(void *arg)
 
 int fsq_produce_open(struct fsq_produce *q, const char *path)
 {
-	int status = 0;
+	int status = FSQ_OK;
 
 	fsq_produce_struct_init(q);
 
@@ -172,9 +172,10 @@ void fsq_produce_close(struct fsq_produce *q)
 
 int fsq_consume_open(struct fsq_consume *q, const char *path)
 {
-	int status = 0;
+	int status = FSQ_OK;
 
-	fsq_produce_open(&q->hdr, path);
+	if((status = fsq_produce_open(&q->hdr, path)))
+		return status;
 
 	fsq_consume_struct_init(q);
 
@@ -194,6 +195,7 @@ int fsq_consume_open(struct fsq_consume *q, const char *path)
 		status = _gen_err(FSQ_SYS_ERR);
 		goto error;
 	}
+	q->watch_thread_created = 1;
 
 done:
 	return status;
@@ -389,7 +391,7 @@ error:
 
 int fsq_advance(struct fsq_consume *q)
 {
-	int status = 0;
+	int status = FSQ_OK;
 
 	// short-circuit repeated calls to fsq_advance without an fsq_head between
 	if(q->head_fd < 0)

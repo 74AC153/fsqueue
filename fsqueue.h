@@ -41,6 +41,7 @@ void fsq_consume_close(struct fsq_consume *q);
 int fsq_enq(struct fsq_produce *q, const char *buf, size_t buflen);
 
 // map the first item in the queue into memory
+// timeout can be NULL, meaning block forever
 int fsq_head(struct fsq_consume *q, struct timespec *timeout, const char **buf, size_t *buflen);
 // unmap first item in queue from memory and advance the queue
 int fsq_advance(struct fsq_consume *q);
