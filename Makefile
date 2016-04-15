@@ -26,7 +26,7 @@ test: fsq fsqueue_test testqueue
 	-./fsq -q testqueue -w 1000 -d --
 	./fsq -q testqueue -w 2000 -d -- &
 	sleep 1
-	echo "hello" | ./fsq -q testqueue -e --
+	echo "OK" | ./fsq -q testqueue -e --
 	sleep 1
 	./fsqueue_test testqueue dest 1000 &
 	./fsqueue_test testqueue source 1000
