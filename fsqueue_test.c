@@ -22,6 +22,8 @@ void print_fsq_err(char *fn_name, int rc)
 		fprintf(stderr, "%s() failed (internal err)\n", fn_name); break;
 	case FSQ_USER_ERR:
 		fprintf(stderr, "%s() failed (user err)\n", fn_name); break;
+	case FSQ_IN_USE:
+		fprintf(stderr, "%s() failed (already in use)\n", fn_name); break;
 	default:
 		fprintf(stderr, "%s() failed error=%d\n", fn_name, rc); break;
 	}
