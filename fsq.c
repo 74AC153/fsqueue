@@ -69,8 +69,6 @@ int main(int argc, char *argv[])
 {
 	int status = 0;
 
-	if(argc == 1)
-		goto usage;
 
 	char *qname = NULL;
 	char *infile = NULL;
@@ -81,7 +79,9 @@ int main(int argc, char *argv[])
 	int rc;
 	FILE *bufstream = NULL;
 
-	int opt;
+	int opt = -1;
+	if(argc == 1)
+		goto usage;
 	while((opt = getopt(argc, argv, "q:w:e:d:h")) != -1) {
 		switch(opt) {
 			default:
