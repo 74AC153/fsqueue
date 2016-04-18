@@ -1,4 +1,4 @@
-OUTBINS=fsqueue.o fsqueue.so fsq fsqueue_test
+OUTBINS=fsqueue.o libfsqueue.so fsq fsqueue_test
 
 default: all
 all: ${OUTBINS}
@@ -10,7 +10,7 @@ LIBS=-lrt -lpthread
 fsqueue.o: fsqueue.c
 	gcc ${CFLAGS} -fPIC -c -o $@ $^
 
-fsqueue.so: fsqueue.o
+libfsqueue.so: fsqueue.o
 	gcc ${CFLAGS} ${LIBS} -fPIC -shared -o $@ $^
 
 fsq: fsq.c fsqueue.o 
