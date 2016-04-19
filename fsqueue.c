@@ -508,9 +508,14 @@ int fsq_advance(struct fsq_consume *q)
 	int status = FSQ_OK;
 
 	// advance queue read index
-	uint64_t rd_idx;
+	uint64_t rd_idx, wr_idx;
 	if((status = get_idx(q->hdr.dirfd, RD_IDX_NAME, &rd_idx)))
 		return status;
+	if((status = get_idx(q->hdr.dirfd, WR_IDX_NAME, &wr_idx)))
+		return status;
+	if(rd_idx >= wr_idx)
+		return FSQ_EMPTY;
+
 	if((status = set_idx(q->hdr.dirfd, RD_IDX_NAME, rd_idx+1)))
 		return status;
 
