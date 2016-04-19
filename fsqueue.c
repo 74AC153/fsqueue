@@ -340,28 +340,63 @@ done:
 		return status;
 }
 
-int fsq_head(struct fsq_consume *q, struct timespec *timeout, const char **buf, size_t *buflen)
+int fsq_enq_file(struct fsq_produce *q, int dirfd, const char *path)
 {
 	int status = FSQ_OK;
 
-	// short-circut repeated calls to fsq_head without an fsq_advance between
-	if(q->head_fd >= 0) {
-		*buf = q->head_buf;
-		*buflen = q->head_buflen;
-		return 0;
+	uint64_t wr_idx;
+	if((status = get_idx(q->dirfd, WR_IDX_NAME, &wr_idx)))
+		return status;
+
+	char name[32];
+	snprintf(name, sizeof(name), "%16.16" PRIx64, wr_idx);
+
+	while(linkat(dirfd, path, q->data_dirfd, name, 0)) {
+		if(errno == EEXIST) {
+			if(unlinkat(q->data_dirfd, name, 0)) { // stale queue file?
+				status = _gen_err(FSQ_SYS_ERR);
+				break;
+			}
+		} else {
+			status = _gen_err(FSQ_SYS_ERR);
+			break;
+		}
 	}
 
-	// wait for queue elements
+	if(status == FSQ_OK)
+		return set_idx(q->dirfd, WR_IDX_NAME, wr_idx+1);
+	else
+		return status;
+}
+
+int fsq_len(struct fsq_produce *q, uint64_t *len)
+{
+	int status = FSQ_OK;
+	uint64_t rd_idx, wr_idx;
+
+	if((status = get_idx(q->dirfd, RD_IDX_NAME, &rd_idx)))
+		return status;
+
+	if((status = get_idx(q->dirfd, WR_IDX_NAME, &wr_idx)))
+		return status;
+
+	*len = (wr_idx - rd_idx);
+	return FSQ_OK;
+}
+
+int _consume_wait(struct fsq_consume *q, struct timespec *timeout, uint64_t *rd_idx)
+{
+	int status = FSQ_OK;
 
 	while(status == FSQ_OK) {
-		uint64_t wr_idx, rd_idx;
-		if((status = get_idx(q->hdr.dirfd, RD_IDX_NAME, &rd_idx)))
+		uint64_t wr_idx;
+		if((status = get_idx(q->hdr.dirfd, RD_IDX_NAME, rd_idx)))
 			break;
 
 		if((status = get_idx(q->hdr.dirfd, WR_IDX_NAME, &wr_idx)))
 			break;
 	
-		if(wr_idx > rd_idx)
+		if(wr_idx > *rd_idx)
 			break; // queue has elements -- no waiting necessary
 
 		pthread_mutex_lock(&q->update_mux);
@@ -384,16 +419,23 @@ int fsq_head(struct fsq_consume *q, struct timespec *timeout, const char **buf, 
 		}
 		pthread_mutex_unlock(&q->update_mux);
 	}
-	if(status != FSQ_OK)
+
+	return status;
+}
+
+int fsq_head(struct fsq_consume *q, struct timespec *timeout, const char **buf, size_t *buflen)
+{
+	int status = FSQ_OK;
+
+	// wait for queue elements
+
+	uint64_t rd_idx;
+	if((status = _consume_wait(q, timeout, &rd_idx)))
 		return status;
 
 	// map head of queue into memory
 
 	{
-		uint64_t rd_idx;
-		if((status = get_idx(q->hdr.dirfd, RD_IDX_NAME, &rd_idx)))
-			goto error;
-
 		char name[32];
 		snprintf(name, sizeof(name), "%16.16" PRIx64, rd_idx);
 	
@@ -443,13 +485,27 @@ error:
 	goto done;
 }
 
-int fsq_advance(struct fsq_consume *q)
+int fsq_head_file(
+	struct fsq_consume *q, struct timespec *timeout,
+	int *dirfd, char *path)
 {
 	int status = FSQ_OK;
 
-	// short-circuit repeated calls to fsq_advance without an fsq_head between
-	if(q->head_fd < 0)
-		return FSQ_OK;
+	// wait for queue elements
+
+	uint64_t rd_idx;
+	if((status = _consume_wait(q, timeout, &rd_idx)))
+		return status;
+
+	snprintf(path, 17, "%16.16" PRIx64, rd_idx);
+	*dirfd = q->hdr.data_dirfd;
+
+	return FSQ_OK;
+}
+
+int fsq_advance(struct fsq_consume *q)
+{
+	int status = FSQ_OK;
 
 	// advance queue read index
 	uint64_t rd_idx;
@@ -459,18 +515,21 @@ int fsq_advance(struct fsq_consume *q)
 		return status;
 
 	// clean up stale queue head buffer
-	munmap((char*)q->head_buf, q->head_buflen);
-	q->head_buf = MAP_FAILED;
-	q->head_buflen = 0;
-	close(q->head_fd);
-	q->head_fd = -1;
+	if(q->head_buf != MAP_FAILED) {
+		munmap((char*)q->head_buf, q->head_buflen);
+		q->head_buf = MAP_FAILED;
+		q->head_buflen = 0;
+	}
+	if(q->head_fd >= 0) {
+		close(q->head_fd);
+		q->head_fd = -1;
+	}
 
 	// remove data file
 	char name[32];
 	snprintf(name, sizeof(name), "%16.16" PRIx64, rd_idx);
-	if(unlinkat(q->hdr.data_dirfd, name, 0)) {
+	if(unlinkat(q->hdr.data_dirfd, name, 0))
 		status = _gen_err(FSQ_SYS_ERR);
-	}
 
 	return status;
 }

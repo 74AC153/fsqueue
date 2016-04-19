@@ -133,7 +133,6 @@ usage:
 
 	if(infile) {
 		struct fsq_produce q;
-		FILE *instream = NULL;
 		char *buf = NULL;
 		size_t buflen = 0;
 
@@ -142,32 +141,25 @@ usage:
 			return 1;
 		}
 
-		if(strcmp(infile, "--") == 0)
-			instream = stdin;
-		else
-			instream = fopen(infile, "rb");
-
-		if(! instream) {
-			perror("error: fopen(<infile>)");
-			status = 1;
-			goto produce_done;
-		}
-
-		bufstream = open_memstream(&buf, &buflen);
-		if(! bufstream) {
-			perror("open_memstream()");
-			status = 1;
-			goto consume_done;
-		}
-		fcopy(bufstream, instream);
-		fclose(bufstream);
-		if(instream != stdin)
-			fclose(instream);
-
-		if((rc = fsq_enq(&q, buf, buflen))) {
-			print_fsq_err("fsq_enq", rc);
-			status = 1;
-			goto produce_done;
+		if(strcmp(infile, "--") == 0) {
+			bufstream = open_memstream(&buf, &buflen);
+			if(! bufstream) {
+				perror("open_memstream()");
+				status = 1;
+				goto produce_done;
+			}
+			fcopy(bufstream, stdin);
+			fclose(bufstream);
+	
+			if((rc = fsq_enq(&q, buf, buflen))) {
+				print_fsq_err("fsq_enq", rc);
+				status = 1;
+			}
+		} else {
+			if((rc = fsq_enq_file(&q, AT_FDCWD, infile))) {
+				print_fsq_err("fsq_enq", rc);
+				status = 1;
+			}
 		}
 
 produce_done:
@@ -176,7 +168,6 @@ produce_done:
 
 	} else if(outfile) {
 		struct fsq_consume q;
-		FILE *outstream = NULL;
 		struct timespec now, timeout, *ptimeout = NULL;
 		const char *buf = NULL;
 		size_t buflen = 0;
@@ -184,17 +175,6 @@ produce_done:
 		if((rc = fsq_consume_open(&q, qname))) {
 			print_fsq_err("fsq_consume_open", rc);
 			return 1;
-		}
-
-		if(strcmp(outfile, "--") == 0)
-			outstream = stdout;
-		else
-			outstream = fopen(outfile, "wb");
-
-		if(! outstream) {
-			perror("error: fopen(<outfile>)");
-			status = 1;
-			goto produce_done;
 		}
 
 		if(wait_ms_str) {
@@ -207,38 +187,60 @@ produce_done:
 			ptimeout = &timeout;
 		}
 
-		rc = fsq_head(&q, ptimeout, &buf, &buflen);
-		if(rc == FSQ_TIMEOUT) {
-			status = 2;
-			goto consume_done;
-		}
-		if(rc == FSQ_IN_USE) {
-			fprintf(stderr, "queue already in use\n");
-			status = 1;
-			goto consume_done;
-		}
-		if(rc) {
-			print_fsq_err("fsq_head", rc);
-			status =  1;
-			goto consume_done;
-		}
+		if(strcmp(outfile, "--") == 0) {
+			rc = fsq_head(&q, ptimeout, &buf, &buflen);
+			if(rc == FSQ_TIMEOUT) {
+				status = 2;
+				goto consume_done;
+			}
+			if(rc) {
+				print_fsq_err("fsq_head", rc);
+				status =  1;
+				goto consume_done;
+			}
+	
+			bufstream = fmemopen((void*)buf, buflen, "rb");
+			if(! bufstream) {
+				perror("fmemopen()");
+				status = 1;
+				goto consume_done;
+			}
+			fcopy(stdout, bufstream);
+			fclose(bufstream);
+	
+			rc = fsq_advance(&q);
+			if(rc) {
+				print_fsq_err("fsq_advance", rc);
+				status = 1;
+				goto consume_done;
+			}
+		} else {
+			int dirfd = -1;
+			char file[17];
 
-		bufstream = fmemopen((void*)buf, buflen, "rb");
-		if(! bufstream) {
-			perror("fmemopen()");
-			status = 1;
-			goto consume_done;
-		}
-		fcopy(outstream, bufstream);
-		fclose(bufstream);
-		if(outstream != stdout)
-			fclose(outstream);
+			rc = fsq_head_file(&q, ptimeout, &dirfd, file);
+			if(rc == FSQ_TIMEOUT) {
+				status = 2;
+				goto consume_done;
+			}
+			if(rc) {
+				print_fsq_err("fsq_head", rc);
+				status =  1;
+				goto consume_done;
+			}
 
-		rc = fsq_advance(&q);
-		if(rc) {
-			print_fsq_err("fsq_advance", rc);
-			status = 1;
-			goto consume_done;
+			if(linkat(dirfd, file, AT_FDCWD, outfile, 0)) {
+				perror("linkat()");
+				status = 1;
+				goto consume_done;
+			}
+
+			rc = fsq_advance(&q);
+			if(rc) {
+				print_fsq_err("fsq_advance", rc);
+				status = 1;
+				goto consume_done;
+			}
 		}
 
 consume_done:

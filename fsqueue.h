@@ -40,11 +40,23 @@ int fsq_consume_open(struct fsq_consume *q, const char *path);
 void fsq_consume_close(struct fsq_consume *q);
 
 int fsq_enq(struct fsq_produce *q, const char *buf, size_t buflen);
+int fsq_enq_file(struct fsq_produce *q, int dirfd, const char *path);
+
+int fsq_len(struct fsq_produce *q, uint64_t *len);
 
 // map the first item in the queue into memory
 // timeout can be NULL, meaning block forever
-int fsq_head(struct fsq_consume *q, struct timespec *timeout, const char **buf, size_t *buflen);
+int fsq_head(
+	struct fsq_consume *q, struct timespec *timeout,
+	const char **buf, size_t *buflen);
+// path is modified and must be at least length 17
+int fsq_head_file(
+	struct fsq_consume *q, struct timespec *timeout,
+	int *dirfd, char *path);
+
 // unmap first item in queue from memory and advance the queue
 int fsq_advance(struct fsq_consume *q);
+
+
 
 #endif
