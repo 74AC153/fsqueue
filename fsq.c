@@ -7,6 +7,7 @@
 
 #include "fsqueue.h"
 
+
 void print_fsq_err(char *fn_name, int rc)
 {
 	switch(rc) {
@@ -77,7 +78,6 @@ int main(int argc, char *argv[])
 	unsigned long wait_ms = -1UL;
 
 	int rc;
-	FILE *bufstream = NULL;
 
 	int opt = -1;
 	if(argc == 1)
@@ -133,44 +133,58 @@ usage:
 
 	if(infile) {
 		struct fsq_produce q;
-		char *buf = NULL;
-		size_t buflen = 0;
+		char fname[FSQ_PATH_LEN];
+		int dirfd;
 
 		if((rc = fsq_produce_open(&q, qname))) {
 			print_fsq_err("fsq_produce_open", rc);
 			return 1;
 		}
 
+		if((rc = fsq_tail_file(&q, &dirfd, fname))) {
+			print_fsq_err("fsq_tail_file", rc);
+			status = 1;
+			goto produce_done;
+		}
+
 		if(strcmp(infile, "--") == 0) {
-			bufstream = open_memstream(&buf, &buflen);
-			if(! bufstream) {
-				perror("open_memstream()");
+			FILE *outstream;
+			int fd = openat(dirfd, fname, O_WRONLY | O_CREAT, 0644);
+			if(fd < 0) {
+				perror("openat()");
 				status = 1;
 				goto produce_done;
 			}
-			fcopy(bufstream, stdin);
-			fclose(bufstream);
-	
-			if((rc = fsq_enq(&q, buf, buflen))) {
-				print_fsq_err("fsq_enq", rc);
+			outstream = fdopen(fd, "wb");
+			if(! outstream) {
+				perror("fdopen()");
 				status = 1;
+				goto produce_done;
 			}
+			fcopy(outstream, stdin);
+			fclose(outstream);
 		} else {
-			if((rc = fsq_enq_file(&q, AT_FDCWD, infile))) {
-				print_fsq_err("fsq_enq", rc);
+			if(linkat(AT_FDCWD, infile, dirfd, fname, 0)) {
+				perror("linkat()");
 				status = 1;
+				goto produce_done;
 			}
 		}
 
+		if((rc = fsq_tail_advance(&q))) {
+			print_fsq_err("fsq_tail_advance", rc);
+			status = 1;
+			goto produce_done;
+		}
+
 produce_done:
-		free(buf);
 		fsq_produce_close(&q);
 
 	} else if(outfile) {
 		struct fsq_consume q;
 		struct timespec now, timeout, *ptimeout = NULL;
-		const char *buf = NULL;
-		size_t buflen = 0;
+		char fname[FSQ_PATH_LEN];
+		int dirfd;
 
 		if((rc = fsq_consume_open(&q, qname))) {
 			print_fsq_err("fsq_consume_open", rc);
@@ -187,60 +201,44 @@ produce_done:
 			ptimeout = &timeout;
 		}
 
+		rc = fsq_head_file(&q, 0, ptimeout, &dirfd, fname);
+		if(rc == FSQ_TIMEOUT) {
+			status = 2;
+			goto consume_done;
+		}
+		if(rc) {
+			print_fsq_err("fsq_head_file", rc);
+			status =  1;
+			goto consume_done;
+		}
+
 		if(strcmp(outfile, "--") == 0) {
-			rc = fsq_head(&q, ptimeout, &buf, &buflen);
-			if(rc == FSQ_TIMEOUT) {
-				status = 2;
-				goto consume_done;
-			}
-			if(rc) {
-				print_fsq_err("fsq_head", rc);
-				status =  1;
-				goto consume_done;
-			}
-	
-			bufstream = fmemopen((void*)buf, buflen, "rb");
-			if(! bufstream) {
-				perror("fmemopen()");
+			FILE *instream;
+			int fd = openat(dirfd, fname, O_RDONLY);
+			if(fd < 0) {
+				perror("openat()");
 				status = 1;
-				goto consume_done;
+				goto produce_done;
 			}
-			fcopy(stdout, bufstream);
-			fclose(bufstream);
-	
-			rc = fsq_advance(&q);
-			if(rc) {
-				print_fsq_err("fsq_advance", rc);
+			instream = fdopen(fd, "rb");
+			if(! instream) {
+				perror("fdopen()");
 				status = 1;
-				goto consume_done;
+				goto produce_done;
 			}
-		} else {
-			int dirfd = -1;
-			char file[17];
+			fcopy(stdout, instream);
+			fclose(instream);
+		} else if(linkat(dirfd, fname, AT_FDCWD, outfile, 0)) {
+			perror("linkat()");
+			status = 1;
+			goto consume_done;
+		}
 
-			rc = fsq_head_file(&q, ptimeout, &dirfd, file);
-			if(rc == FSQ_TIMEOUT) {
-				status = 2;
-				goto consume_done;
-			}
-			if(rc) {
-				print_fsq_err("fsq_head", rc);
-				status =  1;
-				goto consume_done;
-			}
-
-			if(linkat(dirfd, file, AT_FDCWD, outfile, 0)) {
-				perror("linkat()");
-				status = 1;
-				goto consume_done;
-			}
-
-			rc = fsq_advance(&q);
-			if(rc) {
-				print_fsq_err("fsq_advance", rc);
-				status = 1;
-				goto consume_done;
-			}
+		rc = fsq_head_advance(&q);
+		if(rc) {
+			print_fsq_err("fsq_advance", rc);
+			status = 1;
+			goto consume_done;
 		}
 
 consume_done:

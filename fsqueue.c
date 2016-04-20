@@ -35,10 +35,6 @@ static void fsq_produce_struct_init(struct fsq_produce *q)
 // NB: must also call fsq_produce_struct_init()
 static void fsq_consume_struct_init(struct fsq_consume *q)
 {
-	q->head_fd = -1;
-	q->head_buf = MAP_FAILED;
-	q->head_buflen = 0;
-
 	q->inotify_evt_q = -1;
 	q->inotify_wr_idx_wd = -1;
 	//pthread_t watch_thread;
@@ -259,12 +255,6 @@ error:
 
 void fsq_consume_close(struct fsq_consume *q)
 {
-	if(q->head_buf != MAP_FAILED)
-		munmap((char*)q->head_buf, q->head_buflen);
-
-	if(q->head_fd >= 0)
-		close(q->head_fd);
-
 	if(q->watch_thread_created) {
 		pthread_cancel(q->watch_thread);
 		pthread_join(q->watch_thread, NULL);
@@ -293,7 +283,7 @@ static _Bool timespec_geq(struct timespec lhs, struct timespec rhs)
 	return 0;
 }
 
-int fsq_enq(struct fsq_produce *q, const char *buf, size_t buflen)
+int fsq_enq_buf(struct fsq_produce *q, const char *buf, size_t buflen)
 {
 	int status = FSQ_OK;
 	int fd = -1;
@@ -340,7 +330,7 @@ done:
 		return status;
 }
 
-int fsq_enq_file(struct fsq_produce *q, int dirfd, const char *path)
+int fsq_tail_file(struct fsq_produce *q, int *dirfd, char *path)
 {
 	int status = FSQ_OK;
 
@@ -348,25 +338,19 @@ int fsq_enq_file(struct fsq_produce *q, int dirfd, const char *path)
 	if((status = get_idx(q->dirfd, WR_IDX_NAME, &wr_idx)))
 		return status;
 
-	char name[32];
-	snprintf(name, sizeof(name), "%16.16" PRIx64, wr_idx);
+	*dirfd = q->data_dirfd;
+	snprintf(path, FSQ_PATH_LEN, "%16.16" PRIx64, wr_idx);
 
-	while(linkat(dirfd, path, q->data_dirfd, name, 0)) {
-		if(errno == EEXIST) {
-			if(unlinkat(q->data_dirfd, name, 0)) { // stale queue file?
-				status = _gen_err(FSQ_SYS_ERR);
-				break;
-			}
-		} else {
-			status = _gen_err(FSQ_SYS_ERR);
-			break;
-		}
-	}
+	return status;
+}
 
-	if(status == FSQ_OK)
-		return set_idx(q->dirfd, WR_IDX_NAME, wr_idx+1);
-	else
+int fsq_tail_advance(struct fsq_produce *q)
+{
+	int status = FSQ_OK;
+	uint64_t wr_idx;
+	if((status = get_idx(q->dirfd, WR_IDX_NAME, &wr_idx)))
 		return status;
+	return set_idx(q->dirfd, WR_IDX_NAME, wr_idx+1);
 }
 
 int fsq_len(struct fsq_produce *q, uint64_t *len)
@@ -384,7 +368,9 @@ int fsq_len(struct fsq_produce *q, uint64_t *len)
 	return FSQ_OK;
 }
 
-int _consume_wait(struct fsq_consume *q, struct timespec *timeout, uint64_t *rd_idx)
+int _consume_wait(
+	struct fsq_consume *q, uint64_t off, struct timespec *timeout,
+	uint64_t *rd_idx)
 {
 	int status = FSQ_OK;
 
@@ -396,8 +382,8 @@ int _consume_wait(struct fsq_consume *q, struct timespec *timeout, uint64_t *rd_
 		if((status = get_idx(q->hdr.dirfd, WR_IDX_NAME, &wr_idx)))
 			break;
 	
-		if(wr_idx > *rd_idx)
-			break; // queue has elements -- no waiting necessary
+		if(wr_idx > *rd_idx + off)
+			break; // queue has at least off elements -- no waiting necessary
 
 		pthread_mutex_lock(&q->update_mux);
 		while(status == FSQ_OK) {
@@ -423,87 +409,24 @@ int _consume_wait(struct fsq_consume *q, struct timespec *timeout, uint64_t *rd_
 	return status;
 }
 
-int fsq_head(struct fsq_consume *q, struct timespec *timeout, const char **buf, size_t *buflen)
-{
-	int status = FSQ_OK;
-
-	// wait for queue elements
-
-	uint64_t rd_idx;
-	if((status = _consume_wait(q, timeout, &rd_idx)))
-		return status;
-
-	// map head of queue into memory
-
-	{
-		char name[32];
-		snprintf(name, sizeof(name), "%16.16" PRIx64, rd_idx);
-	
-		q->head_fd = openat(q->hdr.data_dirfd, name, O_RDONLY);
-		if(q->head_fd < 0) {
-			status = _gen_err(FSQ_SYS_ERR);
-			goto error;
-		}
-	}
-
-	{
-		struct stat sb;
-		if(fstat(q->head_fd, &sb)) {
-			status = _gen_err(FSQ_SYS_ERR);
-			goto error;
-		}
-		q->head_buflen = sb.st_size;
-	}
-
-	q->head_buf =
-		mmap(NULL, q->head_buflen,
-		     PROT_READ, MAP_SHARED,
-		     q->head_fd, 0);
-	if(q->head_buf == MAP_FAILED) {
-		status = _gen_err(FSQ_SYS_ERR);
-		goto error;
-	}
-
-	// output buffer
-
-	*buf = q->head_buf;
-	*buflen = q->head_buflen;
-
-done:
-	return status;
-
-error:
-	if(q->head_buf != MAP_FAILED)
-		munmap((char*)q->head_buf, q->head_buflen);
-	q->head_buf = MAP_FAILED;
-	q->head_buflen = 0;
-
-	if(q->head_fd >= 0)
-		close(q->head_fd);
-	q->head_fd = -1;
-
-	goto done;
-}
-
 int fsq_head_file(
-	struct fsq_consume *q, struct timespec *timeout,
+	struct fsq_consume *q, uint64_t off, struct timespec *timeout,
 	int *dirfd, char *path)
 {
 	int status = FSQ_OK;
 
 	// wait for queue elements
-
 	uint64_t rd_idx;
-	if((status = _consume_wait(q, timeout, &rd_idx)))
+	if((status = _consume_wait(q, off, timeout, &rd_idx)))
 		return status;
 
-	snprintf(path, 17, "%16.16" PRIx64, rd_idx);
+	snprintf(path, FSQ_PATH_LEN, "%16.16" PRIx64, rd_idx);
 	*dirfd = q->hdr.data_dirfd;
 
 	return FSQ_OK;
 }
 
-int fsq_advance(struct fsq_consume *q)
+int fsq_head_advance(struct fsq_consume *q)
 {
 	int status = FSQ_OK;
 
@@ -518,17 +441,6 @@ int fsq_advance(struct fsq_consume *q)
 
 	if((status = set_idx(q->hdr.dirfd, RD_IDX_NAME, rd_idx+1)))
 		return status;
-
-	// clean up stale queue head buffer
-	if(q->head_buf != MAP_FAILED) {
-		munmap((char*)q->head_buf, q->head_buflen);
-		q->head_buf = MAP_FAILED;
-		q->head_buflen = 0;
-	}
-	if(q->head_fd >= 0) {
-		close(q->head_fd);
-		q->head_fd = -1;
-	}
 
 	// remove data file
 	char name[32];

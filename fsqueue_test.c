@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <inttypes.h>
+#include <fcntl.h>
 
 #include "fsqueue.h"
 
@@ -27,6 +28,53 @@ void print_fsq_err(char *fn_name, int rc)
 	default:
 		fprintf(stderr, "%s() failed error=%d\n", fn_name, rc); break;
 	}
+}
+
+size_t fcopy(FILE *outstream, FILE *instream)
+{
+	size_t n, count = 0;
+	char temp[1024];
+	while((n = fread(temp, 1, sizeof(temp), instream))) {
+		size_t m = fwrite(temp, 1, n, outstream);
+		count += m;
+		if(m == 0)
+			break;
+	}
+	return count;
+}
+
+int spew_buf(int dirfd, char *path, char *buf, size_t len)
+{
+	FILE *stream;
+	int fd = openat(dirfd, path, O_WRONLY | O_CREAT, 0644);
+	if(fd < 0)
+		return -1;
+	stream = fdopen(fd, "wb");
+	if(! stream)
+		return -1;
+	size_t count = fwrite(buf, 1, len, stream);
+	fclose(stream);
+	return count;
+}
+
+int slurp_buf(int dirfd, char *path, char **buf, size_t *len)
+{
+	FILE *instream, *outstream;
+	outstream = open_memstream(buf, len);
+	if(! outstream)
+		return -1;
+
+	int fd = openat(dirfd, path, O_RDONLY);
+	if(fd < 0)
+		return -1;
+	instream = fdopen(fd, "rb");
+	
+	size_t count = fcopy(outstream, instream);
+
+	fclose(outstream);
+	fclose(instream);
+
+	return count;
 }
 
 int main(int argc, char *argv[])
@@ -57,9 +105,20 @@ usage:
 		}
 
 		for(uint32_t i = 0; i < iters; i++) {
-			int rc = fsq_enq(&q, (char*)&i, sizeof(i));
-			if(rc) {
-				print_fsq_err("fsq_enq", rc);
+			int dirfd;
+			char fname[FSQ_PATH_LEN];
+			if((rc = fsq_tail_file(&q, &dirfd, fname))) {
+				print_fsq_err("fsq_tail_file", rc);
+				return 1;
+			}
+
+			if(0 >= spew_buf(dirfd, fname, (char*)&i, sizeof(i))) {
+				perror("spew_buf()");
+				return 1;
+			}
+
+			if((rc = fsq_tail_advance(&q))) {
+				print_fsq_err("fsq_tail_advance", rc);
 				return 1;
 			}
 		}
@@ -75,21 +134,30 @@ usage:
 
 
 		for(uint32_t i = 0; i < iters; i++) {
-			const char *buf;
-			size_t buflen;
-			int rc = fsq_head(&q, NULL, &buf, &buflen);
+			char *buf = NULL;
+			size_t buflen = 0;
+
+			int dirfd;
+			char fname[FSQ_PATH_LEN];
+			int rc = fsq_head_file(&q, 0, NULL, &dirfd, fname);
 			if(rc) {
-				print_fsq_err("fsq_head", rc);
+				print_fsq_err("fsq_head_file", rc);
 				return 1;
 			}
+
+			if(0 >= slurp_buf(dirfd, fname, &buf, &buflen)) {
+				perror("slurp_buf()");
+				return 1;
+			}
+
 			if(*(uint32_t *)buf != i) {
 				fprintf(stderr, "got %" PRId32 ", expected %" PRId32 "\n",
 				        *(uint32_t *)buf, i);
 				return 1;
 			}
-			rc = fsq_advance(&q);
+			rc = fsq_head_advance(&q);
 			if(rc) {
-				print_fsq_err("fsq_advance", rc);
+				print_fsq_err("fsq_head_advance", rc);
 				return 1;
 			}
 		}
