@@ -20,16 +20,19 @@ struct fsq_produce {
 	int data_dirfd;
 };
 
-struct fsq_consume {
-	struct fsq_produce hdr;
-
+struct dir_watch_info {
 	int inotify_evt_q;
-	int inotify_wr_idx_wd;
+	int inotify_wd;
 	pthread_t watch_thread;
 	int watch_thread_created;
-	int wr_idx_updated;
+	int updated;
 	pthread_mutex_t update_mux;
 	pthread_cond_t update_cond;
+};
+
+struct fsq_consume {
+	struct fsq_produce hdr;
+	struct dir_watch_info watch;
 };
 
 int fsq_produce_open(struct fsq_produce *q, const char *path);

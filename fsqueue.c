@@ -35,13 +35,7 @@ static void fsq_produce_struct_init(struct fsq_produce *q)
 // NB: must also call fsq_produce_struct_init()
 static void fsq_consume_struct_init(struct fsq_consume *q)
 {
-	q->inotify_evt_q = -1;
-	q->inotify_wr_idx_wd = -1;
-	//pthread_t watch_thread;
-	q->watch_thread_created = 0;
-	q->wr_idx_updated = 0;
-	pthread_mutex_init(&q->update_mux, NULL);
-	pthread_cond_init(&q->update_cond, NULL);
+	(void)q;
 }
 
 static int get_idx(int dirfd, const char *path, uint64_t *val)
@@ -97,7 +91,7 @@ static int set_idx(int dirfd, const char *path, uint64_t val)
 
 void *watch_thread_fn(void *arg)
 {
-	struct fsq_consume *q = (struct fsq_consume *)arg;
+	struct dir_watch_info *info = (struct dir_watch_info*)arg;
 	union {
 		struct inotify_event evt;
 		char padding[sizeof(struct inotify_event) + NAME_MAX + 1];
@@ -107,15 +101,15 @@ void *watch_thread_fn(void *arg)
 	while(1) {
 		ssize_t rc;
 		evtbuf.evt.mask = 0;
-		if(0 < (rc = read(q->inotify_evt_q, &evtbuf, len))) {
+		if(0 < (rc = read(info->inotify_evt_q, &evtbuf, len))) {
 			if(evtbuf.evt.mask & IN_CLOSE_WRITE) {
 				int oldstate;
 				pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, &oldstate);
 
-				pthread_mutex_lock(&q->update_mux);
-				q->wr_idx_updated = 1;
-				pthread_cond_signal(&q->update_cond);
-				pthread_mutex_unlock(&q->update_mux);
+				pthread_mutex_lock(&info->update_mux);
+				info->updated = 1;
+				pthread_cond_signal(&info->update_cond);
+				pthread_mutex_unlock(&info->update_mux);
 
 				pthread_setcancelstate(PTHREAD_CANCEL_ENABLE, &oldstate);
 			}
@@ -214,6 +208,66 @@ void fsq_produce_close(struct fsq_produce *q)
 	_common_close(q);
 }
 
+static int _dir_watch_reset(struct dir_watch_info *info)
+{
+	int status = FSQ_OK;
+
+	if(info->watch_thread_created) {
+		pthread_cancel(info->watch_thread);
+		pthread_join(info->watch_thread, NULL);
+	}
+
+	if(info->inotify_wd >= 0)
+		inotify_rm_watch(info->inotify_evt_q, info->inotify_wd);
+
+	if(info->inotify_evt_q >= 0)
+		close(info->inotify_evt_q);
+
+	pthread_mutex_destroy(&info->update_mux);
+	pthread_cond_destroy(&info->update_cond);
+
+	return status;
+}
+
+static int _dir_watch_init(struct dir_watch_info *info, const char *path)
+{
+	int status = FSQ_OK;
+
+	info->inotify_evt_q = -1;
+	info->inotify_wd = -1;
+	info->watch_thread_created = 0;
+	info->updated = 0;
+
+	pthread_mutex_init(&info->update_mux, NULL);
+	pthread_cond_init(&info->update_cond, NULL);
+
+	info->inotify_evt_q = inotify_init();
+	if(info->inotify_evt_q < 0) {
+		status = _gen_err(FSQ_SYS_ERR);
+		goto error;
+	}
+
+	info->inotify_wd =
+		inotify_add_watch(info->inotify_evt_q, path, IN_CLOSE_WRITE);
+	if(info->inotify_wd < 0) {
+		status = _gen_err(FSQ_SYS_ERR);
+		goto error;
+	}
+
+	if(pthread_create(&info->watch_thread, NULL, watch_thread_fn, info)) {
+		status = _gen_err(FSQ_SYS_ERR);
+		goto error;
+	}
+	info->watch_thread_created = 1;
+
+done:
+	return status;
+
+error:
+	_dir_watch_reset(info);
+	goto done;
+}
+
 int fsq_consume_open(struct fsq_consume *q, const char *path)
 {
 	int status = FSQ_OK;
@@ -226,24 +280,8 @@ int fsq_consume_open(struct fsq_consume *q, const char *path)
 	if((status = _lock(&q->hdr, RD_LOCK_NAME)))
 		goto error;
 
-	q->inotify_evt_q = inotify_init();
-	if(q->inotify_evt_q < 0) {
-		status = _gen_err(FSQ_SYS_ERR);
+	if((status = _dir_watch_init(&q->watch, path)))
 		goto error;
-	}
-
-	q->inotify_wr_idx_wd =
-		inotify_add_watch(q->inotify_evt_q, path, IN_CLOSE_WRITE);
-	if(q->inotify_wr_idx_wd < 0) {
-		status = _gen_err(FSQ_SYS_ERR);
-		goto error;
-	}
-
-	if(pthread_create(&q->watch_thread, NULL, watch_thread_fn, q)) {
-		status = _gen_err(FSQ_SYS_ERR);
-		goto error;
-	}
-	q->watch_thread_created = 1;
 
 done:
 	return status;
@@ -255,16 +293,7 @@ error:
 
 void fsq_consume_close(struct fsq_consume *q)
 {
-	if(q->watch_thread_created) {
-		pthread_cancel(q->watch_thread);
-		pthread_join(q->watch_thread, NULL);
-	}
-
-	if(q->inotify_wr_idx_wd >= 0)
-		inotify_rm_watch(q->inotify_evt_q, q->inotify_wr_idx_wd);
-
-	if(q->inotify_evt_q >= 0)
-		close(q->inotify_evt_q);
+	_dir_watch_reset(&q->watch);
 
 	_unlock(&q->hdr, RD_LOCK_NAME);
 
@@ -368,33 +397,57 @@ int fsq_len(struct fsq_produce *q, uint64_t *len)
 	return FSQ_OK;
 }
 
-int _consume_wait(
-	struct fsq_consume *q, uint64_t off, struct timespec *timeout,
-	uint64_t *rd_idx)
+struct consume_ready_args {
+	struct fsq_consume *q;
+	uint64_t off;
+	uint64_t rd_idx;
+};
+
+static int consume_ready(void *_arg, _Bool *met)
+{
+	int status = FSQ_OK;
+
+	struct consume_ready_args *args = (struct consume_ready_args *) _arg;
+	if((status = get_idx(args->q->hdr.dirfd, RD_IDX_NAME, &args->rd_idx)))
+		return status;
+
+	uint64_t wr_idx;
+	if((status = get_idx(args->q->hdr.dirfd, WR_IDX_NAME, &wr_idx)))
+		return status;
+
+	if(wr_idx > args->rd_idx + args->off)
+		*met = 1;
+	else
+		*met = 0;
+
+	return status;
+}
+
+static int _watch_condition_wait(
+	struct dir_watch_info *info,
+	int (*test_fn)(void *arg, _Bool *met), void *arg,
+	struct timespec *timeout)
 {
 	int status = FSQ_OK;
 
 	while(status == FSQ_OK) {
-		uint64_t wr_idx;
-		if((status = get_idx(q->hdr.dirfd, RD_IDX_NAME, rd_idx)))
+		_Bool met = 0;
+		if((status = test_fn(arg, &met)))
+			break;
+		if(met)
 			break;
 
-		if((status = get_idx(q->hdr.dirfd, WR_IDX_NAME, &wr_idx)))
-			break;
-	
-		if(wr_idx > *rd_idx + off)
-			break; // queue has at least off elements -- no waiting necessary
-
-		pthread_mutex_lock(&q->update_mux);
+		pthread_mutex_lock(&info->update_mux);
 		while(status == FSQ_OK) {
-			if(q->wr_idx_updated) {
-				q->wr_idx_updated = 0;
+			if(info->updated) {
+				// ack update and retry test
+				info->updated = 0;
 				break;
 			}
 			if(! timeout) {
-				pthread_cond_wait(&q->update_cond, &q->update_mux);
+				pthread_cond_wait(&info->update_cond, &info->update_mux);
 			} else {
-				pthread_cond_timedwait(&q->update_cond, &q->update_mux, timeout);
+				pthread_cond_timedwait(&info->update_cond, &info->update_mux, timeout);
 				struct timespec ts;
 				if(clock_gettime(CLOCK_REALTIME, &ts)) {
 					status = _gen_err(FSQ_SYS_ERR);
@@ -403,7 +456,7 @@ int _consume_wait(
 				}
 			}
 		}
-		pthread_mutex_unlock(&q->update_mux);
+		pthread_mutex_unlock(&info->update_mux);
 	}
 
 	return status;
@@ -416,11 +469,11 @@ int fsq_head_file(
 	int status = FSQ_OK;
 
 	// wait for queue elements
-	uint64_t rd_idx;
-	if((status = _consume_wait(q, off, timeout, &rd_idx)))
+	struct consume_ready_args args = { .q = q, .off = off, .rd_idx = 0 };
+	if((status = _watch_condition_wait(&q->watch, consume_ready, &args, timeout)))
 		return status;
 
-	snprintf(path, FSQ_PATH_LEN, "%16.16" PRIx64, rd_idx);
+	snprintf(path, FSQ_PATH_LEN, "%16.16" PRIx64, args.rd_idx);
 	*dirfd = q->hdr.data_dirfd;
 
 	return FSQ_OK;
