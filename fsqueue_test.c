@@ -107,7 +107,7 @@ usage:
 		for(uint32_t i = 0; i < iters; i++) {
 			int dirfd;
 			char fname[FSQ_PATH_LEN];
-			if((rc = fsq_tail_file(&q, &dirfd, fname))) {
+			if((rc = fsq_tail_file(&q, 0, NULL, &dirfd, fname))) {
 				print_fsq_err("fsq_tail_file", rc);
 				return 1;
 			}

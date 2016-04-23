@@ -141,7 +141,7 @@ usage:
 			return 1;
 		}
 
-		if((rc = fsq_tail_file(&q, &dirfd, fname))) {
+		if((rc = fsq_tail_file(&q, 0, NULL, &dirfd, fname))) {
 			print_fsq_err("fsq_tail_file", rc);
 			status = 1;
 			goto produce_done;

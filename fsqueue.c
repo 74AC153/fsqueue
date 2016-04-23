@@ -26,16 +26,10 @@ static int __attribute__((noinline)) _gen_err(int val)
 	return val;
 }
 
-static void fsq_produce_struct_init(struct fsq_produce *q)
+static void _fsq_common_struct_init(struct fsq_common *q)
 {
 	q->dirfd = -1;
 	q->data_dirfd = -1;
-}
-
-// NB: must also call fsq_produce_struct_init()
-static void fsq_consume_struct_init(struct fsq_consume *q)
-{
-	(void)q;
 }
 
 static int get_idx(int dirfd, const char *path, uint64_t *val)
@@ -119,95 +113,6 @@ void *watch_thread_fn(void *arg)
 	return NULL;
 }
 
-static void _common_close(struct fsq_produce *q)
-{
-	if(q->dirfd >= 0)
-		close(q->dirfd);
-
-	if(q->data_dirfd >= 0)
-		close(q->data_dirfd);
-}
-
-static int _common_open(struct fsq_produce *q, const char *path)
-{
-	int status = FSQ_OK;
-
-	fsq_produce_struct_init(q);
-
-	q->dirfd = open(path, O_RDONLY | O_DIRECTORY);
-	if(q->dirfd < 0) {
-		status = _gen_err(FSQ_USER_ERR);
-		goto error;
-	}
-
-	if(mkdirat(q->dirfd, DATA_DIR_NAME, 0755)) {
-		if(errno != EEXIST) {
-			status = _gen_err(FSQ_SYS_ERR);
-			goto error;
-		}
-	}
-
-	q->data_dirfd = openat(q->dirfd, DATA_DIR_NAME, O_RDONLY | O_DIRECTORY);
-	if(q->data_dirfd < 0) {
-		status = _gen_err(FSQ_SYS_ERR);
-		goto error;
-	}
-
-done:
-	return status;
-
-error:
-	_common_close(q);
-	goto done;
-}
-
-static int _lock(struct fsq_produce *q, char *which)
-{
-	int status = FSQ_OK;
-
-	int fd = openat(
-		q->dirfd, which, O_CREAT | O_WRONLY | O_EXCL, 0644);
-	if(fd < 0) {
-		if(errno == EEXIST)
-			status = _gen_err(FSQ_IN_USE);
-		else
-			status = _gen_err(FSQ_SYS_ERR);
-	} else {
-		close(fd);
-	}
-
-	return status;
-}
-
-static void _unlock(struct fsq_produce *q, char *which)
-{
-	unlinkat(q->dirfd, which, 0);
-}
-
-int fsq_produce_open(struct fsq_produce *q, const char *path)
-{
-	int status = FSQ_OK;
-
-	if((status = _common_open(q, path)))
-		return status;
-
-	if((status = _lock(q, WR_LOCK_NAME)))
-		goto error;
-
-done:
-	return status;
-
-error:
-	_common_close(q);
-	goto done;
-}
-
-void fsq_produce_close(struct fsq_produce *q)
-{
-	_unlock(q, WR_LOCK_NAME);
-	_common_close(q);
-}
-
 static int _dir_watch_reset(struct dir_watch_info *info)
 {
 	int status = FSQ_OK;
@@ -229,10 +134,8 @@ static int _dir_watch_reset(struct dir_watch_info *info)
 	return status;
 }
 
-static int _dir_watch_init(struct dir_watch_info *info, const char *path)
+static void _dir_watch_init(struct dir_watch_info *info)
 {
-	int status = FSQ_OK;
-
 	info->inotify_evt_q = -1;
 	info->inotify_wd = -1;
 	info->watch_thread_created = 0;
@@ -240,6 +143,11 @@ static int _dir_watch_init(struct dir_watch_info *info, const char *path)
 
 	pthread_mutex_init(&info->update_mux, NULL);
 	pthread_cond_init(&info->update_cond, NULL);
+}
+
+static int _dir_watch_start(struct dir_watch_info *info, const char *path)
+{
+	int status = FSQ_OK;
 
 	info->inotify_evt_q = inotify_init();
 	if(info->inotify_evt_q < 0) {
@@ -268,19 +176,116 @@ error:
 	goto done;
 }
 
+static void _fsq_common_close(struct fsq_common *q)
+{
+	if(q->dirfd >= 0)
+		close(q->dirfd);
+
+	if(q->data_dirfd >= 0)
+		close(q->data_dirfd);
+}
+
+static int _fsq_common_open(struct fsq_common *q, const char *path)
+{
+	int status = FSQ_OK;
+
+	_fsq_common_struct_init(q);
+
+	q->dirfd = open(path, O_RDONLY | O_DIRECTORY);
+	if(q->dirfd < 0) {
+		status = _gen_err(FSQ_USER_ERR);
+		goto error;
+	}
+
+	if(mkdirat(q->dirfd, DATA_DIR_NAME, 0755)) {
+		if(errno != EEXIST) {
+			status = _gen_err(FSQ_SYS_ERR);
+			goto error;
+		}
+	}
+
+	q->data_dirfd = openat(q->dirfd, DATA_DIR_NAME, O_RDONLY | O_DIRECTORY);
+	if(q->data_dirfd < 0) {
+		status = _gen_err(FSQ_SYS_ERR);
+		goto error;
+	}
+
+done:
+	return status;
+
+error:
+	_fsq_common_close(q);
+	goto done;
+}
+
+static int _lock(struct fsq_common *q, char *which)
+{
+	int status = FSQ_OK;
+
+	int fd = openat(
+		q->dirfd, which, O_CREAT | O_WRONLY | O_EXCL, 0644);
+	if(fd < 0) {
+		if(errno == EEXIST)
+			status = _gen_err(FSQ_IN_USE);
+		else
+			status = _gen_err(FSQ_SYS_ERR);
+	} else {
+		close(fd);
+	}
+
+	return status;
+}
+
+static void _unlock(struct fsq_common *q, char *which)
+{
+	unlinkat(q->dirfd, which, 0);
+}
+
+int fsq_produce_open(struct fsq_produce *q, const char *path)
+{
+	int status = FSQ_OK;
+
+	_fsq_common_struct_init(&q->hdr);
+	_dir_watch_init(&q->watch);
+
+	if((status = _fsq_common_open(&q->hdr, path)))
+		return status;
+
+	if((status = _lock(&q->hdr, WR_LOCK_NAME)))
+		goto error;
+
+	if((status = _dir_watch_start(&q->watch, path)))
+		goto error;
+
+done:
+	return status;
+
+error:
+	_fsq_common_close(&q->hdr);
+	goto done;
+}
+
+void fsq_produce_close(struct fsq_produce *q)
+{
+	_dir_watch_reset(&q->watch);
+	_unlock(&q->hdr, WR_LOCK_NAME);
+	_fsq_common_close(&q->hdr);
+}
+
 int fsq_consume_open(struct fsq_consume *q, const char *path)
 {
 	int status = FSQ_OK;
 
-	fsq_consume_struct_init(q);
+	_fsq_common_struct_init(&q->hdr);
+	_dir_watch_init(&q->watch);
 
-	if((status = _common_open(&q->hdr, path)))
+	if((status = _fsq_common_open(&q->hdr, path)))
 		return status;
 
 	if((status = _lock(&q->hdr, RD_LOCK_NAME)))
 		goto error;
 
-	if((status = _dir_watch_init(&q->watch, path)))
+	if((status = _dir_watch_start(&q->watch, path)))
 		goto error;
 
 done:
@@ -294,10 +299,8 @@ error:
 void fsq_consume_close(struct fsq_consume *q)
 {
 	_dir_watch_reset(&q->watch);
-
 	_unlock(&q->hdr, RD_LOCK_NAME);
-
-	_common_close(&q->hdr);
+	_fsq_common_close(&q->hdr);
 }
 
 // return lhs >= rhs
@@ -310,91 +313,6 @@ static _Bool timespec_geq(struct timespec lhs, struct timespec rhs)
 		return lhs.tv_nsec >= rhs.tv_nsec;
 
 	return 0;
-}
-
-int fsq_enq_buf(struct fsq_produce *q, const char *buf, size_t buflen)
-{
-	int status = FSQ_OK;
-	int fd = -1;
-
-	uint64_t wr_idx;
-	if((status = get_idx(q->dirfd, WR_IDX_NAME, &wr_idx)))
-		return status;
-
-	{
-		char name[32];
-		snprintf(name, sizeof(name), "%16.16" PRIx64, wr_idx);
-		fd = openat(q->data_dirfd, name, O_CREAT | O_WRONLY, 0644);
-		if(fd < 0)
-			return _gen_err(FSQ_SYS_ERR);
-	}
-
-	ssize_t wstatus = 0;
-	while((wstatus = write(fd, buf, buflen)) < 0) {
-		if(errno != EINTR)
-			break;
-		status = _gen_err(FSQ_SYS_ERR);
-		goto done;
-	}
-	if(wstatus < 0) {
-		status = _gen_err(FSQ_SYS_ERR);
-		goto done;
-	} else if(wstatus != (ssize_t)buflen) {
-		status = _gen_err(FSQ_INTERNAL_ERR);
-		goto done;
-	}
-	// in case of overwrite of existing data file
-	if(ftruncate(fd, buflen)) {
-		status = _gen_err(FSQ_SYS_ERR);
-		goto done;
-	}
-
-done:
-	if(fd >= 0)
-		close(fd);
-
-	if(status == FSQ_OK)
-		return set_idx(q->dirfd, WR_IDX_NAME, wr_idx+1);
-	else
-		return status;
-}
-
-int fsq_tail_file(struct fsq_produce *q, int *dirfd, char *path)
-{
-	int status = FSQ_OK;
-
-	uint64_t wr_idx;
-	if((status = get_idx(q->dirfd, WR_IDX_NAME, &wr_idx)))
-		return status;
-
-	*dirfd = q->data_dirfd;
-	snprintf(path, FSQ_PATH_LEN, "%16.16" PRIx64, wr_idx);
-
-	return status;
-}
-
-int fsq_tail_advance(struct fsq_produce *q)
-{
-	int status = FSQ_OK;
-	uint64_t wr_idx;
-	if((status = get_idx(q->dirfd, WR_IDX_NAME, &wr_idx)))
-		return status;
-	return set_idx(q->dirfd, WR_IDX_NAME, wr_idx+1);
-}
-
-int fsq_len(struct fsq_produce *q, uint64_t *len)
-{
-	int status = FSQ_OK;
-	uint64_t rd_idx, wr_idx;
-
-	if((status = get_idx(q->dirfd, RD_IDX_NAME, &rd_idx)))
-		return status;
-
-	if((status = get_idx(q->dirfd, WR_IDX_NAME, &wr_idx)))
-		return status;
-
-	*len = (wr_idx - rd_idx);
-	return FSQ_OK;
 }
 
 struct consume_ready_args {
@@ -416,6 +334,34 @@ static int consume_ready(void *_arg, _Bool *met)
 		return status;
 
 	if(wr_idx > args->rd_idx + args->off)
+		*met = 1;
+	else
+		*met = 0;
+
+	return status;
+}
+
+struct produce_ready_args {
+	struct fsq_produce *q;
+	uint64_t maxlen;
+	uint64_t wr_idx;
+};
+
+static int produce_ready(void *_arg, _Bool *met)
+{
+	int status = FSQ_OK;
+
+	struct produce_ready_args *args = (struct produce_ready_args *) _arg;
+	uint64_t rd_idx;
+	if((status = get_idx(args->q->hdr.dirfd, RD_IDX_NAME, &rd_idx)))
+		return status;
+
+	if((status = get_idx(args->q->hdr.dirfd, WR_IDX_NAME, &args->wr_idx)))
+		return status;
+
+	if(args->maxlen == 0)
+		*met = 1;
+	else if(args->wr_idx < rd_idx + args->maxlen)
 		*met = 1;
 	else
 		*met = 0;
@@ -460,6 +406,51 @@ static int _watch_condition_wait(
 	}
 
 	return status;
+}
+
+int fsq_tail_file(
+	struct fsq_produce *q, uint64_t maxlen, struct timespec *timeout,
+	int *dirfd, char *path)
+{
+	int status = FSQ_OK;
+
+	uint64_t wr_idx;
+	if((status = get_idx(q->hdr.dirfd, WR_IDX_NAME, &wr_idx)))
+		return status;
+
+	// wait for queue max len
+	struct produce_ready_args args = { .q = q, .maxlen = maxlen, .wr_idx = 0 };
+	if((status = _watch_condition_wait(&q->watch, produce_ready, &args, timeout)))
+		return status;
+
+	*dirfd = q->hdr.data_dirfd;
+	snprintf(path, FSQ_PATH_LEN, "%16.16" PRIx64, args.wr_idx);
+
+	return status;
+}
+
+int fsq_tail_advance(struct fsq_produce *q)
+{
+	int status = FSQ_OK;
+	uint64_t wr_idx;
+	if((status = get_idx(q->hdr.dirfd, WR_IDX_NAME, &wr_idx)))
+		return status;
+	return set_idx(q->hdr.dirfd, WR_IDX_NAME, wr_idx+1);
+}
+
+int fsq_len(struct fsq_produce *q, uint64_t *len)
+{
+	int status = FSQ_OK;
+	uint64_t rd_idx, wr_idx;
+
+	if((status = get_idx(q->hdr.dirfd, RD_IDX_NAME, &rd_idx)))
+		return status;
+
+	if((status = get_idx(q->hdr.dirfd, WR_IDX_NAME, &wr_idx)))
+		return status;
+
+	*len = (wr_idx - rd_idx);
+	return FSQ_OK;
 }
 
 int fsq_head_file(
