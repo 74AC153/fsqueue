@@ -77,6 +77,11 @@ int main(int argc, char *argv[])
 	char *wait_ms_str = NULL;
 	unsigned long wait_ms = -1UL;
 
+	struct fsq q;
+
+	char fname[FSQ_PATH_LEN];
+	int dirfd;
+
 	int rc;
 
 	int opt = -1;
@@ -131,20 +136,17 @@ usage:
 		goto usage;
 	}
 
-	if(infile) {
-		struct fsq_produce q;
-		char fname[FSQ_PATH_LEN];
-		int dirfd;
 
-		if((rc = fsq_produce_open(&q, qname))) {
-			print_fsq_err("fsq_produce_open", rc);
+	if(infile) {
+		if((rc = fsq_open(&q, qname, FSQ_PRODUCE))) {
+			print_fsq_err("fsq_open", rc);
 			return 1;
 		}
 
 		if((rc = fsq_tail_file(&q, 0, NULL, &dirfd, fname))) {
 			print_fsq_err("fsq_tail_file", rc);
 			status = 1;
-			goto produce_done;
+			goto done;
 		}
 
 		if(strcmp(infile, "--") == 0) {
@@ -153,13 +155,13 @@ usage:
 			if(fd < 0) {
 				perror("openat()");
 				status = 1;
-				goto produce_done;
+				goto done;
 			}
 			outstream = fdopen(fd, "wb");
 			if(! outstream) {
 				perror("fdopen()");
 				status = 1;
-				goto produce_done;
+				goto done;
 			}
 			fcopy(outstream, stdin);
 			fclose(outstream);
@@ -167,27 +169,21 @@ usage:
 			if(linkat(AT_FDCWD, infile, dirfd, fname, 0)) {
 				perror("linkat()");
 				status = 1;
-				goto produce_done;
+				goto done;
 			}
 		}
 
 		if((rc = fsq_tail_advance(&q))) {
 			print_fsq_err("fsq_tail_advance", rc);
 			status = 1;
-			goto produce_done;
+			goto done;
 		}
 
-produce_done:
-		fsq_produce_close(&q);
-
 	} else if(outfile) {
-		struct fsq_consume q;
 		struct timespec now, timeout, *ptimeout = NULL;
-		char fname[FSQ_PATH_LEN];
-		int dirfd;
 
-		if((rc = fsq_consume_open(&q, qname))) {
-			print_fsq_err("fsq_consume_open", rc);
+		if((rc = fsq_open(&q, qname, FSQ_CONSUME))) {
+			print_fsq_err("fsq_open", rc);
 			return 1;
 		}
 
@@ -195,7 +191,7 @@ produce_done:
 			if(clock_gettime(CLOCK_REALTIME, &now)) {
 				perror("clock_gettime()");
 				status = 1;
-				goto produce_done;
+				goto done;
 			}
 			timeout = timespec_add(now, timespec_ms(wait_ms));
 			ptimeout = &timeout;
@@ -204,12 +200,12 @@ produce_done:
 		rc = fsq_head_file(&q, 0, ptimeout, &dirfd, fname);
 		if(rc == FSQ_TIMEOUT) {
 			status = 2;
-			goto consume_done;
+			goto done;
 		}
 		if(rc) {
 			print_fsq_err("fsq_head_file", rc);
 			status =  1;
-			goto consume_done;
+			goto done;
 		}
 
 		if(strcmp(outfile, "--") == 0) {
@@ -218,32 +214,33 @@ produce_done:
 			if(fd < 0) {
 				perror("openat()");
 				status = 1;
-				goto produce_done;
+				goto done;
 			}
 			instream = fdopen(fd, "rb");
 			if(! instream) {
 				perror("fdopen()");
 				status = 1;
-				goto produce_done;
+				goto done;
 			}
 			fcopy(stdout, instream);
 			fclose(instream);
 		} else if(linkat(dirfd, fname, AT_FDCWD, outfile, 0)) {
 			perror("linkat()");
 			status = 1;
-			goto consume_done;
+			goto done;
 		}
 
 		rc = fsq_head_advance(&q);
 		if(rc) {
 			print_fsq_err("fsq_advance", rc);
 			status = 1;
-			goto consume_done;
+			goto done;
 		}
 
-consume_done:
-		fsq_consume_close(&q);
 	}
+
+done:
+	fsq_close(&q);
 
 	return status;
 }

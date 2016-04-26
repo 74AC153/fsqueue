@@ -16,8 +16,6 @@
 #define FSQ_PATH_LEN 17
 
 struct fsq_common {
-	int dirfd;
-	int data_dirfd;
 };
 
 struct dir_watch_info {
@@ -30,36 +28,32 @@ struct dir_watch_info {
 	pthread_cond_t update_cond;
 };
 
-struct fsq_produce {
-	struct fsq_common hdr;
+#define FSQ_PRODUCE 0x1
+#define FSQ_CONSUME 0x2
+struct fsq {
+	int dirfd;
+	int data_dirfd;
 	struct dir_watch_info watch;
+	int flags;
 };
 
-struct fsq_consume {
-	struct fsq_common hdr;
-	struct dir_watch_info watch;
-};
-
-int fsq_produce_open(struct fsq_produce *q, const char *path);
-void fsq_produce_close(struct fsq_produce *q);
-
-int fsq_consume_open(struct fsq_consume *q, const char *path);
-void fsq_consume_close(struct fsq_consume *q);
+int fsq_open(struct fsq *q, const char *path, int flags);
+void fsq_close(struct fsq *q);
 
 // if maxlen == 0, don't block on max queue length
 int fsq_tail_file(
-	struct fsq_produce *q, uint64_t maxlen, struct timespec *timeout,
+	struct fsq *q, uint64_t maxlen, struct timespec *timeout,
 	int *dirfd, char *path);
-int fsq_tail_advance(struct fsq_produce *q);
+int fsq_tail_advance(struct fsq *q);
 
-int fsq_len(struct fsq_produce *q, uint64_t *len);
+int fsq_len(struct fsq *q, uint64_t *len);
 
 // timeout can be NULL, meaning block forever
 // path is modified and must be at least length 17
 int fsq_head_file(
-	struct fsq_consume *q, uint64_t off, struct timespec *timeout,
+	struct fsq *q, uint64_t off, struct timespec *timeout,
 	int *dirfd, char *path);
-int fsq_head_advance(struct fsq_consume *q);
+int fsq_head_advance(struct fsq *q);
 
 
 

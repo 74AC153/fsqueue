@@ -96,11 +96,12 @@ usage:
 		goto usage;
 	}
 
+	int rc;
 	if(strcmp(mode, "source") == 0) {
-		struct fsq_produce q;
-		int rc = fsq_produce_open(&q, queuename);
+		struct fsq q;
+		rc = fsq_open(&q, queuename, FSQ_PRODUCE);
 		if(rc) {
-			print_fsq_err("fsq_produce_open", rc);
+			print_fsq_err("fsq_open", rc);
 			return 1;
 		}
 
@@ -123,12 +124,12 @@ usage:
 			}
 		}
 
-		fsq_produce_close(&q);
+		fsq_close(&q);
 	} else if(strcmp(mode, "dest") == 0) {
-		struct fsq_consume q;
-		int rc = fsq_consume_open(&q, queuename);
+		struct fsq q;
+		rc = fsq_open(&q, queuename, FSQ_CONSUME);
 		if(rc) {
-			print_fsq_err("fsq_consume_open", rc);
+			print_fsq_err("fsq_open", rc);
 			return 1;
 		}
 
@@ -139,7 +140,7 @@ usage:
 
 			int dirfd;
 			char fname[FSQ_PATH_LEN];
-			int rc = fsq_head_file(&q, 0, NULL, &dirfd, fname);
+			rc = fsq_head_file(&q, 0, NULL, &dirfd, fname);
 			if(rc) {
 				print_fsq_err("fsq_head_file", rc);
 				return 1;
@@ -162,7 +163,7 @@ usage:
 			}
 		}
 
-		fsq_consume_close(&q);
+		fsq_close(&q);
 	} else {
 		fprintf(stderr, "bad mode: %s\n", mode);
 		goto usage;
