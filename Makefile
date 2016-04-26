@@ -35,4 +35,4 @@ coverage_report: fsqueue.gcno
 	gcov fsqueue.gcno
 
 clean:
-	-rm -r ${OUTBINS} *.gcda *.gcno testqueue
+	-rm -r ${OUTBINS} *.gcda *.gcno *.gcov testqueue
