@@ -13,11 +13,6 @@
 #define FSQ_IN_USE -5
 #define FSQ_EMPTY -6
 
-#define FSQ_PATH_LEN 17
-
-struct fsq_common {
-};
-
 struct dir_watch_info {
 	int inotify_evt_q;
 	int inotify_wd;
@@ -28,8 +23,6 @@ struct dir_watch_info {
 	pthread_cond_t update_cond;
 };
 
-#define FSQ_PRODUCE 0x1
-#define FSQ_CONSUME 0x2
 struct fsq {
 	int dirfd;
 	int data_dirfd;
@@ -37,8 +30,14 @@ struct fsq {
 	int flags;
 };
 
+// flags
+#define FSQ_PRODUCE 0x1
+#define FSQ_CONSUME 0x2
 int fsq_open(struct fsq *q, const char *path, int flags);
 void fsq_close(struct fsq *q);
+
+// length of 'path' arg to fsq_head_file and fsq_tail_file
+#define FSQ_PATH_LEN 17
 
 // if maxlen == 0, don't block on max queue length
 int fsq_tail_file(
