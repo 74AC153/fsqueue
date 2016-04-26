@@ -11,7 +11,7 @@ fsqueue.o: fsqueue.c
 	gcc ${CFLAGS} -fPIC -c -o $@ $^
 
 libfsqueue.so: fsqueue.o
-	gcc ${CFLAGS} ${LIBS} -fPIC -shared -o $@ $^
+	gcc ${LIBS} -shared -o $@ $^
 
 fsq: fsq.c fsqueue.o 
 	gcc ${CFLAGS} ${LIBS} -o $@ $^
