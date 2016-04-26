@@ -4,7 +4,7 @@ default: all
 all: ${OUTBINS}
 
 #COVERAGE=-coverage
-CFLAGS=-Wall -Wextra -g3 --std=c99 -D_POSIX_C_SOURCE=200809L -D_BSD_SOURCE ${COVERAGE}
+CFLAGS=-Wall -Wshadow -Wextra -g3 --std=c99 -D_POSIX_C_SOURCE=200809L -D_BSD_SOURCE ${COVERAGE}
 LIBS=-lrt -lpthread
 
 fsqueue.o: fsqueue.c
